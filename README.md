@@ -111,6 +111,22 @@ food.example.com {
 
 然后在网页「⋯ → 邀请朋友」生成一次性链接发给朋友。
 
+### 5b. Tailscale HTTPS（如 https://kevin.xxx.ts.net:5010）
+1. Tailscale 管理后台 → DNS：开启 **MagicDNS** 与 **HTTPS Certificates**。
+2. 让应用只监听本机另一个端口，把 5010 留给 Tailscale。`.env` 中：
+   ```
+   PORT=127.0.0.1:5011
+   COOKIE_SECURE=true
+   ```
+   然后 `docker compose up -d`。
+3. 让 Tailscale 在 5010 提供 HTTPS 并转发到应用：
+   ```bash
+   sudo tailscale serve --bg --https=5010 http://127.0.0.1:5011
+   tailscale serve status
+   ```
+4. 访问 `https://<机器名>.<tailnet>.ts.net:5010`。HTTPS 下「📍 当前位置」可用。
+撤销：`sudo tailscale serve --https=5010 off`。
+
 ### 6. 备份
 ```bash
 chmod +x scripts/backup.sh
