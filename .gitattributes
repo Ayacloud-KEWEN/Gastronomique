@@ -1,0 +1,5 @@
+# 统一使用 LF 换行，确保树莓派上脚本可直接运行
+* text=auto eol=lf
+*.png binary
+*.webp binary
+*.jpg binary

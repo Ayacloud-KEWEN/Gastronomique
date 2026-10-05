@@ -1,0 +1,16 @@
+# 开发模式（仅电脑上使用，不要用于树莓派）：
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+# - 前端 public/ 直接挂载：改完刷新浏览器即可
+# - 后端 server/src 挂载：改完执行 docker compose restart app
+# - 数据库开放 15432 端口，可用 DBeaver / pgAdmin 等工具查看
+services:
+  app:
+    volumes:
+      - ./public:/app/public:ro
+      - ./server/src:/app/server/src:ro
+      - ./server/migrations:/app/server/migrations:ro
+    environment:
+      LOG_LEVEL: debug
+  db:
+    ports:
+      - "127.0.0.1:15432:5432"

@@ -1,0 +1,40 @@
+# Gastronomique · 树莓派 5 部署
+# 用法：cp .env.example .env && 修改 .env && docker compose up -d --build
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gastronomique
+      POSTGRES_USER: gastro
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?请在 .env 中设置 DB_PASSWORD}
+    volumes:
+      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+    # 树莓派内存有限：适度调小
+    command: postgres -c shared_buffers=128MB -c max_connections=30 -c effective_cache_size=512MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gastro -d gastronomique"]
+      interval: 10s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://gastro:${DB_PASSWORD}@db:5432/gastronomique
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
+      APP_SECRET: ${APP_SECRET:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
+      THUMB_SIZE: ${THUMB_SIZE:-640}
+    volumes:
+      - ${DATA_DIR:-./data}/media:/data/media
+    ports:
+      - "${PORT:-5010}:5010"
