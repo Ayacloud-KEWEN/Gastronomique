@@ -6,6 +6,8 @@ cd "$(dirname "$0")/.."
 export MSYS_NO_PATHCONV=1
 PKG="${1:?用法：$0 <迁移包.tar>}"
 [ -f "$PKG" ] || { echo "找不到 $PKG"; exit 1; }
+# .env 若在 Windows 上编辑过会带 CRLF，docker compose 与 shell 都会读错，先统一为 LF
+[ -f .env ] && sed -i 's/\r$//' .env
 set -a; source .env; set +a
 DATA="${DATA_DIR:-./data}"
 WORK=$(mktemp -d)

@@ -3,6 +3,8 @@
 #   0 3 * * * cd /home/pi/gastronomique && ./scripts/backup.sh >> backups/backup.log 2>&1
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# .env 若在 Windows 上编辑过会带 CRLF，docker compose 与 shell 都会读错，先统一为 LF
+[ -f .env ] && sed -i 's/\r$//' .env
 source .env
 DEST="${BACKUP_DIR:-./backups}"
 DATA="${DATA_DIR:-./data}"

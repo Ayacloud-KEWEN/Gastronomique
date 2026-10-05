@@ -5,6 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export MSYS_NO_PATHCONV=1            # Windows Git Bash 下避免路径被改写
+# .env 若在 Windows 上编辑过会带 CRLF，docker compose 与 shell 都会读错，先统一为 LF
+[ -f .env ] && sed -i 's/\r$//' .env
 set -a; source .env; set +a
 DATA="${DATA_DIR:-./data}"
 STAMP=$(date +%Y%m%d-%H%M)

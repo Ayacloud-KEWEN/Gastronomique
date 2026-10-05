@@ -9,6 +9,8 @@ docker compose version >/dev/null || { echo "缺少 docker compose 插件"; exit
 [ -f .env ] || { echo "缺少 .env（应随部署包一起带来）"; exit 1; }
 [ "$(uname -m)" = "aarch64" ] || echo "提示：当前架构 $(uname -m)，建议使用 64 位系统"
 
+# .env 若在 Windows 上编辑过会带 CRLF，docker compose 与 shell 都会读错，先统一为 LF
+[ -f .env ] && sed -i 's/\r$//' .env
 set -a; source .env; set +a
 DATA="${DATA_DIR:-./data}"
 mkdir -p "$DATA/media" backups
