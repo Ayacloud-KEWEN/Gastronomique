@@ -3,7 +3,7 @@
 # 用法：./scripts/update.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
-[ -f .env ] && sed -i 's/$//' .env   # 统一 .env 换行（Windows 编辑过会带 CRLF）
+[ -f .env ] && sed -i 's/\r$//' .env   # 统一 .env 换行（Windows 编辑过会带 CRLF）
 
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   echo "本机有未提交的代码改动，已停止（避免覆盖）："; git status --short --untracked-files=no; exit 1
