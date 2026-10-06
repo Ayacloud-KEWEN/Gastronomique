@@ -399,7 +399,7 @@ function item(_, id){
         <dt>类别</dt><dd>${TYPES[it.type]?.zh}</dd>${countryOf(it)?`<dt>国家</dt><dd><a href="#/catalog?by=region" style="color:var(--accent)">${esc(countryName(countryOf(it)))}</a></dd>`:""}<dt>地区</dt><dd>${esc(it.region)||"—"}</dd>
         <dt>入藏</dt><dd>${(it.created||"").slice(0,10)}</dd></dl>
         <div class="tags" style="margin-top:10px">${(it.tags||[]).map(t=>`<a class="tag" href="#/discover?tag=${encodeURIComponent(t)}">#${esc(t)}</a>`).join("")}</div></div>
-      <div class="panel"><h4>知识连接 · ${nb.length}</h4>
+      <div class="panel"><h4 style="display:flex;justify-content:space-between">知识连接 · ${nb.length}${nb.length?`<a href="#/graph?focus=${encodeURIComponent(it.id)}" style="color:var(--accent);font-weight:400">在网络中查看 →</a>`:""}</h4>
         ${nb.map(n=>`<div class="rel" data-go="${esc(n.item.id)}" style="${tc(n.item.type)}"><span class="dot"></span>${esc(n.item.name)}<span class="lbl">${n.dir==="in"?"← ":""}${esc(n.label)}</span></div>`).join("") || `<p class="muted" style="font-size:13px">在正文中用 [[名称]] 或在编辑中添加关系。</p>`}
       </div>
       ${sameRegion.length?`<div class="panel"><h4>同一片土地</h4>${sameRegion.map(x=>`<div class="rel" data-go="${esc(x.id)}" style="${tc(x.type)}"><span class="dot"></span>${esc(x.name)}</div>`).join("")}</div>`:""}
@@ -652,73 +652,181 @@ $("#modal").onclick = e => {
 const escModal = () => $("#modal").dataset.lock ? $("#modal")._cancel?.() : closeModal();
 
 /* ---------- knowledge graph (自制力导向布局) ---------- */
-function graph(){
+/* 知识网络
+   - 总览：专题成员默认收进专题节点（显示件数），隐藏孤立节点；只给重要节点写名字
+   - 聚焦：搜索或单击节点 → 只看它 1～2 层以内的邻居，侧栏列出连接；双击打开藏品 */
+function graph(params){
   const hidden = new Set(cfg.hiddenTypes||[]);
-  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>知识网络 · Knowledge Graph</h2><span class="muted">拖拽节点 · 滚轮缩放 · 双击打开</span></div>
+  const g = cfg.graph ||= { expand:false, isolated:false, depth:1 };
+  const focusId = params?.get("focus") || "";
+  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>知识网络 · Knowledge Graph</h2><span class="muted">单击聚焦 · 双击打开 · 拖拽 / 滚轮缩放</span></div>
+  <div class="graph-bar">
+    <div class="graph-search"><input id="gq" placeholder="搜索藏品并聚焦…" autocomplete="off"><div class="graph-sug" id="gsug" hidden></div></div>
+    ${focusId?`<div class="seg" id="gdepth">${[1,2].map(d=>`<button class="sm ${g.depth===d?"on":""}" data-d="${d}">${d} 层</button>`).join("")}</div><button class="sm" id="gall">← 返回总览</button>`
+      :`<label class="gchk"><input type="checkbox" id="gexp" ${g.expand?"checked":""}> 展开专题成员</label><label class="gchk"><input type="checkbox" id="giso" ${g.isolated?"checked":""}> 显示孤立藏品</label>`}
+  </div>
   <div class="graph-wrap"><canvas id="cv"></canvas>
     <div class="legend" id="lg">${Object.entries(TYPES).map(([k,v])=>`<span data-t="${k}" class="${hidden.has(k)?"off":""}" style="${tc(k)}"><i class="dot"></i>${v.zh}</span>`).join("")}</div>
-    <div class="graph-tip" id="gtip"></div></div>`;
+    <div class="graph-zoom"><button class="sm" data-z="in" aria-label="放大">＋</button><button class="sm" data-z="out" aria-label="缩小">－</button><button class="sm" data-z="fit" aria-label="适应窗口">⤢</button></div>
+    <aside class="graph-info" id="ginfo" hidden></aside>
+    <div class="graph-stat muted" id="gstat"></div></div>`;
   const cv = $("#cv"), ctx = cv.getContext("2d"), css = getComputedStyle(document.documentElement);
   const color = t => css.getPropertyValue("--t-"+t).trim() || "#888";
-  const ink = css.getPropertyValue("--ink").trim(), line = css.getPropertyValue("--line").trim(), muted = css.getPropertyValue("--muted").trim();
+  const ink = css.getPropertyValue("--ink").trim(), line = css.getPropertyValue("--line").trim(), muted = css.getPropertyValue("--muted").trim(), paper = css.getPropertyValue("--paper").trim(), accent = css.getPropertyValue("--accent").trim();
   let W, H, dpr = devicePixelRatio||1;
   const resize = () => { const r = cv.getBoundingClientRect(); W=r.width; H=r.height; cv.width=W*dpr; cv.height=H*dpr; };
   resize();
-  const items = db.items.filter(i=>!hidden.has(i.type));
-  const ids = new Set(items.map(i=>i.id));
-  const E = edges().filter(e=>ids.has(e.s)&&ids.has(e.t));
+
+  // ---- 选出要画的节点和边 ----
+  const all = edges();
+  const hubOf = {};   // 成员 → 专题
+  const colIds = new Set(collections().map(c => c.id));
+  for (const e of all) if (e.label===MEMBER_LABEL && colIds.has(e.t)) hubOf[e.s] ||= e.t;
+  let ids, E;
+  if (focusId && byId(focusId)){
+    ids = new Set([focusId]);
+    for (let d = 0; d < g.depth; d++){ const add = []; for (const e of all){ if (ids.has(e.s)) add.push(e.t); if (ids.has(e.t)) add.push(e.s); } add.forEach(x => ids.add(x)); }
+    for (const id of [...ids]) if (id!==focusId && hidden.has(byId(id)?.type)) ids.delete(id);
+    E = all.filter(e => ids.has(e.s) && ids.has(e.t));
+  } else {
+    const rep = id => !g.expand && hubOf[id] ? hubOf[id] : id;   // 收起时，成员的连接改挂到专题上
+    const seen = new Set(); E = [];
+    for (const e of all){
+      const s = rep(e.s), t = rep(e.t); if (s===t) continue;
+      if (hidden.has(byId(s)?.type) || hidden.has(byId(t)?.type)) continue;
+      const k = s < t ? s+"|"+t : t+"|"+s; if (seen.has(k)) continue; seen.add(k);
+      E.push({ ...e, s, t });
+    }
+    ids = new Set(E.flatMap(e => [e.s, e.t]));
+    if (!g.expand) for (const c of colIds) if (!hidden.has(byId(c)?.type)) ids.add(c);   // 专题即使没有外部连接也显示
+    if (g.isolated) for (const it of db.items) if (!hidden.has(it.type) && (g.expand || !hubOf[it.id])) ids.add(it.id);
+  }
   const deg = {}; E.forEach(e=>{deg[e.s]=(deg[e.s]||0)+1; deg[e.t]=(deg[e.t]||0)+1;});
-  const N = items.map((it,i) => { const a=i*2.4; return { it, x:Math.cos(a)*(60+i*6), y:Math.sin(a)*(60+i*6), vx:0, vy:0, r:5+Math.sqrt(deg[it.id]||0)*3.5 }; });
+  const size = {}; if (!focusId && !g.expand) for (const m in hubOf) size[hubOf[m]] = (size[hubOf[m]]||0) + 1;
+  const items = [...ids].map(byId).filter(Boolean);
+  const N = items.map((it,i) => { const a=i*2.4, rr=30+Math.sqrt(i)*28;
+    return { it, x:Math.cos(a)*rr, y:Math.sin(a)*rr, vx:0, vy:0, n:size[it.id]||0,
+      r: it.id===focusId ? 14 : size[it.id] ? 9+Math.sqrt(size[it.id])*2.2 : 4.5+Math.sqrt(deg[it.id]||0)*2.6 }; });
   const M = Object.fromEntries(N.map(n=>[n.it.id,n]));
-  const L = E.map(e=>({a:M[e.s],b:M[e.t],e}));
-  let view = {x:0,y:0,k:1}, drag=null, hover=null, alpha=1, raf, panning=null;
+  const L = E.map(e=>({a:M[e.s],b:M[e.t],e})).filter(l => l.a && l.b);
+  if (M[focusId]) { M[focusId].x = M[focusId].y = 0; }
+  // 名字只写给连接最多的一部分节点，放大或悬停时再显示其余
+  const labelRank = [...N].sort((a,b)=>b.r-a.r); const labelMin = labelRank[Math.min(labelRank.length-1, focusId?60:24)]?.r || 0;
+  $("#gstat").textContent = `${N.length} 个节点 · ${L.length} 条连接`;
+
+  let view = {x:0,y:0,k:1}, drag=null, hover=null, sel=M[focusId]||null, alpha=1, raf, panning=null, moved=false;
   function tick(){
-    if (alpha > 0.01){
-      for (let i=0;i<N.length;i++) for (let j=i+1;j<N.length;j++){
-        const a=N[i], b=N[j]; let dx=b.x-a.x, dy=b.y-a.y, d2=dx*dx+dy*dy||1, f=1800/d2*alpha;
-        const d=Math.sqrt(d2); dx/=d; dy/=d; a.vx-=dx*f; a.vy-=dy*f; b.vx+=dx*f; b.vy+=dy*f;
-      }
-      for (const l of L){ const dx=l.b.x-l.a.x, dy=l.b.y-l.a.y, d=Math.hypot(dx,dy)||1, f=(d-90)*0.04*alpha; l.a.vx+=dx/d*f; l.a.vy+=dy/d*f; l.b.vx-=dx/d*f; l.b.vy-=dy/d*f; }
-      for (const n of N){ n.vx -= n.x*0.004*alpha; n.vy -= n.y*0.004*alpha; if (n!==drag){ n.x+=n.vx; n.y+=n.vy; } n.vx*=0.6; n.vy*=0.6; }
-      alpha *= 0.985;
+    if (alpha > 0.005){
+      step();
     }
     draw(); raf = requestAnimationFrame(tick);
+  }
+  function step(){
+    for (let i=0;i<N.length;i++) for (let j=i+1;j<N.length;j++){
+      const a=N[i], b=N[j]; let dx=b.x-a.x, dy=b.y-a.y, d2=dx*dx+dy*dy||1; if (d2 > 160000) continue;
+      const f=(1400+(a.r+b.r)*60)/d2*alpha, d=Math.sqrt(d2); dx/=d; dy/=d; a.vx-=dx*f; a.vy-=dy*f; b.vx+=dx*f; b.vy+=dy*f;
+    }
+    for (const l of L){ const dx=l.b.x-l.a.x, dy=l.b.y-l.a.y, d=Math.hypot(dx,dy)||1, rest=(focusId?90:60)+l.a.r+l.b.r, f=(d-rest)*0.05*alpha; l.a.vx+=dx/d*f; l.a.vy+=dy/d*f; l.b.vx-=dx/d*f; l.b.vy-=dy/d*f; }
+    for (const n of N){ const gr = deg[n.it.id] ? 0.006 : 0.03; n.vx -= n.x*gr*alpha; n.vy -= n.y*gr*alpha;   // 孤立节点拉近些，避免把整张图挤小
+      if (n!==drag && !(focusId && n.it.id===focusId)){ n.x+=n.vx; n.y+=n.vy; } n.vx*=0.55; n.vy*=0.55; }
+    alpha *= 0.975;
+  }
+  function fit(){
+    if (!N.length) return;
+    const xs = N.map(n=>n.x), ys = N.map(n=>n.y), pad = 70;
+    // 信息栏占去的空间：宽屏在右侧，手机在底部
+    const box = $("#ginfo"), open = !box.hidden, side = open && W > 860 ? 300 : 0, bottom = open && W <= 860 ? box.offsetHeight + 10 : 0;
+    const x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys);
+    view.k = Math.max(0.2, Math.min(2.2, (W-side-pad*2)/((x1-x0)||1), (H-bottom-pad*2)/((y1-y0)||1)));
+    view.x = -(x0+x1)/2*view.k - side/2; view.y = -(y0+y1)/2*view.k - bottom/2;
   }
   function draw(){
     ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
     ctx.translate(W/2+view.x, H/2+view.y); ctx.scale(view.k, view.k);
-    const hn = hover ? new Set([hover.it.id, ...L.filter(l=>l.a===hover||l.b===hover).flatMap(l=>[l.a.it.id,l.b.it.id])]) : null;
+    const act = hover || sel;
+    const hn = act ? new Set([act.it.id, ...L.filter(l=>l.a===act||l.b===act).flatMap(l=>[l.a.it.id,l.b.it.id])]) : null;
+    const actDeg = hn ? hn.size - 1 : 0;   // 连接太多时不写关系名，免得糊成一片
     for (const l of L){
-      const on = !hn || (hn.has(l.a.it.id)&&hn.has(l.b.it.id)&&(l.a===hover||l.b===hover));
-      ctx.globalAlpha = on?0.9:0.12; ctx.strokeStyle = on&&hover?muted:line; ctx.lineWidth = 1.2/view.k;
-      ctx.setLineDash(l.e.soft?[4,4]:[]); ctx.beginPath(); ctx.moveTo(l.a.x,l.a.y); ctx.lineTo(l.b.x,l.b.y); ctx.stroke();
-      if (hover && on){ ctx.fillStyle=muted; ctx.font=`${10/view.k}px Inter`; ctx.textAlign="center"; ctx.fillText(l.e.label,(l.a.x+l.b.x)/2,(l.a.y+l.b.y)/2-3); }
+      const on = !hn || l.a===act || l.b===act;
+      ctx.globalAlpha = on ? (act ? 0.9 : 0.45) : 0.06; ctx.strokeStyle = on&&act ? muted : line; ctx.lineWidth = (on&&act?1.4:1)/view.k;
+      ctx.setLineDash(l.e.soft?[4/view.k,4/view.k]:[]); ctx.beginPath(); ctx.moveTo(l.a.x,l.a.y); ctx.lineTo(l.b.x,l.b.y); ctx.stroke();
+      if (act && on && view.k > 0.5 && actDeg <= 15){ ctx.globalAlpha=0.85; ctx.fillStyle=muted; ctx.font=`${10/view.k}px Inter, sans-serif`; ctx.textAlign="center"; ctx.fillText(l.e.label,(l.a.x+l.b.x)/2,(l.a.y+l.b.y)/2-3/view.k); }
     }
     ctx.setLineDash([]);
+    const labels = [];
     for (const n of N){
       const on = !hn || hn.has(n.it.id);
-      ctx.globalAlpha = on?1:0.2; ctx.fillStyle = color(n.it.type);
+      ctx.globalAlpha = on?1:0.15; ctx.fillStyle = color(n.it.type);
       ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,7); ctx.fill();
-      if (n.it.status==="tried"){ ctx.strokeStyle=ink; ctx.lineWidth=1.5/view.k; ctx.stroke(); }
-      if (view.k>0.6 || n===hover || n.r>9){ ctx.fillStyle=ink; ctx.font=`${(n===hover?13:11.5)/view.k}px "Noto Serif SC", serif`; ctx.textAlign="center"; ctx.fillText(n.it.name, n.x, n.y+n.r+13/view.k); }
+      if (n.n){ ctx.lineWidth=3/view.k; ctx.strokeStyle=paper; ctx.stroke(); ctx.lineWidth=1.2/view.k; ctx.strokeStyle=color(n.it.type); ctx.beginPath(); ctx.arc(n.x,n.y,n.r+3/view.k,0,7); ctx.stroke();
+        ctx.fillStyle="#fff"; ctx.font=`600 ${Math.max(9, n.r*0.8)/view.k*Math.min(view.k,1)}px Inter, sans-serif`; ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.fillText(n.n, n.x, n.y); ctx.textBaseline="alphabetic"; }
+      if (n.it.status==="tried"){ ctx.strokeStyle=ink; ctx.lineWidth=1.5/view.k; ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,7); ctx.stroke(); }
+      if (n===sel){ ctx.strokeStyle=accent; ctx.lineWidth=2.5/view.k; ctx.beginPath(); ctx.arc(n.x,n.y,n.r+5/view.k,0,7); ctx.stroke(); }
+      const show = n===act || (hn ? hn.has(n.it.id) && (view.k>0.7 || n.r>=labelMin) : (n.r >= labelMin || view.k > 1.3));
+      if (show && on) labels.push(n);
+    }
+    // 简单避让：按重要性依次放，已占位置重叠就跳过（当前节点除外）
+    const boxes = [];
+    labels.sort((a,b)=>(b===act)-(a===act) || b.r-a.r);
+    for (const n of labels){
+      const fs = (n===act?14:12)/view.k; ctx.font=`${n===act?"600 ":""}${fs}px "Noto Serif SC", serif`;
+      const w = ctx.measureText(n.it.name).width, x = n.x - w/2, y = n.y + n.r + 4/view.k, h = fs*1.25;
+      if (n!==act && boxes.some(b => x < b.x+b.w && x+w > b.x && y < b.y+b.h && y+h > b.y)) continue;
+      boxes.push({x,y,w,h});
+      ctx.globalAlpha=1; ctx.lineWidth=3/view.k; ctx.strokeStyle=paper; ctx.textAlign="center"; ctx.textBaseline="top";
+      ctx.strokeText(n.it.name, n.x, y); ctx.fillStyle=ink; ctx.fillText(n.it.name, n.x, y); ctx.textBaseline="alphabetic";
     }
     ctx.globalAlpha=1;
   }
   const toWorld = (cx,cy) => { const r=cv.getBoundingClientRect(); return [((cx-r.left)-W/2-view.x)/view.k, ((cy-r.top)-H/2-view.y)/view.k]; };
-  const hit = (x,y) => N.find(n => Math.hypot(n.x-x,n.y-y) < n.r+4);
-  cv.onpointerdown = e => { const [x,y]=toWorld(e.clientX,e.clientY); drag=hit(x,y); if(!drag) panning={x:e.clientX-view.x,y:e.clientY-view.y}; cv.setPointerCapture(e.pointerId); };
+  const hit = (x,y) => { let best=null, bd=Infinity; for (const n of N){ const d=Math.hypot(n.x-x,n.y-y); if (d < n.r+6/view.k && d < bd){ best=n; bd=d; } } return best; };
+  const focusUrl = id => "#/graph?focus=" + encodeURIComponent(id);
+  function info(n){
+    const box = $("#ginfo"); if (!n){ box.hidden = true; return; }
+    const it = n.it, nb = neighbors(it.id), ms = colIds.has(it.id) ? membersOf(it.id) : [];
+    box.hidden = false;
+    box.innerHTML = `<button class="sm ghost gi-x" aria-label="关闭">×</button>${chip(it.type)}<h3>${esc(it.name)}</h3>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
+      ${it.summary?`<p>${esc(it.summary)}</p>`:""}
+      <div class="gi-act"><a class="primary sm btn" href="#/item/${encodeURIComponent(it.id)}">打开藏品</a>${it.id!==focusId?`<a class="sm btn" href="${focusUrl(it.id)}">聚焦此处</a>`:""}</div>
+      ${ms.length?`<div class="eyebrow">专题成员 · ${ms.length}</div>`:""}
+      <div class="eyebrow">连接 · ${nb.length}</div>
+      <div class="gi-list">${nb.slice(0,40).map(x=>`<a class="rel" href="${focusUrl(x.item.id)}" style="${tc(x.item.type)}"><span class="dot"></span>${esc(x.item.name)}<span class="lbl">${x.dir==="in"?"← ":""}${esc(x.label)}</span></a>`).join("")}${nb.length>40?`<div class="muted" style="font-size:12px">还有 ${nb.length-40} 条…</div>`:""}</div>`;
+    box.querySelector(".gi-x").onclick = () => { sel = null; info(null); };
+  }
+  if (sel) info(sel);
+  cv.onpointerdown = e => { const [x,y]=toWorld(e.clientX,e.clientY); drag=hit(x,y); moved=false; if(!drag) panning={x:e.clientX-view.x,y:e.clientY-view.y,cx:e.clientX,cy:e.clientY}; cv.setPointerCapture(e.pointerId); };
   cv.onpointermove = e => {
     const [x,y]=toWorld(e.clientX,e.clientY);
-    if (drag){ drag.x=x; drag.y=y; alpha=Math.max(alpha,0.3); }
-    else if (panning){ view.x=e.clientX-panning.x; view.y=e.clientY-panning.y; }
-    else { hover = hit(x,y)||null; cv.style.cursor = hover?"pointer":"grab"; $("#gtip").textContent = hover ? `${hover.it.name} · ${hover.it.region||""}` : ""; }
+    if (drag){ if (Math.hypot(drag.x-x, drag.y-y) > 2/view.k) moved = true; drag.x=x; drag.y=y; drag.vx=drag.vy=0; alpha=Math.max(alpha,0.15); }
+    else if (panning){ if (Math.hypot(e.clientX-panning.cx, e.clientY-panning.cy) > 3) moved = true; view.x=e.clientX-panning.x; view.y=e.clientY-panning.y; }
+    else { hover = hit(x,y)||null; cv.style.cursor = hover?"pointer":"grab"; }
   };
-  cv.onpointerup = () => { drag=null; panning=null; };
+  cv.onpointerup = () => { if (!moved){ sel = drag || null; info(sel); } drag=null; panning=null; };
+  cv.onpointerleave = () => { hover = null; };
   cv.ondblclick = e => { const n=hit(...toWorld(e.clientX,e.clientY)); if(n) go("#/item/"+encodeURIComponent(n.it.id)); };
-  cv.onwheel = e => { e.preventDefault(); view.k = Math.min(3,Math.max(0.3, view.k*(e.deltaY<0?1.1:0.9))); };
+  const zoom = (f, cx = W/2, cy = H/2) => { const k = Math.min(4, Math.max(0.15, view.k*f)), r = k/view.k;
+    view.x = (cx - W/2) - ((cx - W/2) - view.x)*r; view.y = (cy - H/2) - ((cy - H/2) - view.y)*r; view.k = k; };
+  cv.onwheel = e => { e.preventDefault(); const r=cv.getBoundingClientRect(); zoom(e.deltaY<0?1.12:0.89, e.clientX-r.left, e.clientY-r.top); };
+  app.querySelector(".graph-zoom").onclick = e => { const z = e.target.closest("[data-z]")?.dataset.z; if (z==="in") zoom(1.25); if (z==="out") zoom(0.8); if (z==="fit") fit(); };
   $("#lg").onclick = e => { const s=e.target.closest("[data-t]"); if(!s) return; const t=s.dataset.t; hidden.has(t)?hidden.delete(t):hidden.add(t); cfg.hiddenTypes=[...hidden]; saveCfg(); route(); };
+  const opt = (id, k) => { const el = $(id); if (el) el.onchange = () => { g[k] = el.checked; saveCfg(); route(); }; };
+  opt("#gexp", "expand"); opt("#giso", "isolated");
+  if ($("#gdepth")) $("#gdepth").onclick = e => { const b = e.target.closest("[data-d]"); if (b){ g.depth = +b.dataset.d; saveCfg(); route(); } };
+  if ($("#gall")) $("#gall").onclick = () => go("#/graph");
+  // 搜索：名称、外文名、标签
+  const q = $("#gq"), sug = $("#gsug");
+  q.oninput = () => {
+    const s = q.value.trim().toLowerCase();
+    const hits = s ? db.items.filter(i => [i.name, i.alt, (i.tags||[]).join(" ")].join(" ").toLowerCase().includes(s)).slice(0, 8) : [];
+    sug.hidden = !hits.length;
+    sug.innerHTML = hits.map(i => `<a href="${focusUrl(i.id)}" style="${tc(i.type)}"><span class="dot"></span>${esc(i.name)}<span class="muted">${esc(i.alt||"")}</span></a>`).join("");
+  };
+  q.onkeydown = e => { if (e.key==="Enter"){ const a = sug.querySelector("a"); if (a) location.hash = a.getAttribute("href"); } if (e.key==="Escape"){ q.value=""; sug.hidden=true; } };
+  q.onblur = () => setTimeout(() => sug.hidden = true, 150);
   window.addEventListener("resize", resize);
-  tick();
+  // 先离屏算到基本稳定再显示：打开即是整理好、对齐窗口的图，不再有「炸开」的过程
+  const t0 = performance.now(); while (alpha > 0.02 && performance.now() - t0 < 400) step();
+  fit(); tick();
   graphStop = () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
 }
 
