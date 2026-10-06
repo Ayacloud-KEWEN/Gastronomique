@@ -1039,7 +1039,7 @@ const COUNTRIES = {
   HU:["匈牙利",["匈牙利","hungary"]], CZ:["捷克",["捷克","czech"]], GR:["希腊",["希腊","greece"]], HR:["克罗地亚",["克罗地亚","croatia"]],
   US:["美国",["美国","usa","united states","加州","纽约"]], CA:["加拿大",["加拿大","canada"]], MX:["墨西哥",["墨西哥","mexico"]],
   PE:["秘鲁",["秘鲁","peru"]], BR:["巴西",["巴西","brazil"]], AR:["阿根廷",["阿根廷","argentina"]], CL:["智利",["智利","chile"]],
-  MA:["摩洛哥",["摩洛哥","morocco"]], EG:["埃及",["埃及","egypt"]], ET:["埃塞俄比亚",["埃塞俄比亚","ethiopia"]], ZA:["南非",["南非","south africa"]],
+  MA:["摩洛哥",["摩洛哥","morocco"]], TN:["突尼斯",["突尼斯","tunisia","tunisie"]], EG:["埃及",["埃及","egypt"]], ET:["埃塞俄比亚",["埃塞俄比亚","ethiopia"]], ZA:["南非",["南非","south africa"]],
   AU:["澳大利亚",["澳大利亚","australia"]], NZ:["新西兰",["新西兰","new zealand"]],
   XX:["多国 / 跨地区",["全球","多国","斯堪的纳维亚","scandinavia","地中海","古罗马"]],
 };
