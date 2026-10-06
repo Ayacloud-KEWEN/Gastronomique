@@ -672,7 +672,7 @@ function aiSettings(){
         <details><summary class="muted" style="font-size:12px;cursor:pointer">高级：接口地址（用于代理或兼容服务）</summary>
           <label style="margin-top:6px">Base URL<input data-p="${id}" data-f="baseUrl" value="${esc(p.baseUrl)}" placeholder="${esc(p.defaultBaseUrl)}"></label></details>
       </div>
-      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button type="button" class="sm" data-test="${id}" ${p.hasKey?"":"disabled"}>测试连接</button>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button type="button" class="sm" data-test="${id}">测试连接</button>
         ${p.hasKey && !p.fromEnv ? `<button type="button" class="sm ghost" data-clear="${id}">删除密钥</button>` : ""}<span class="muted" style="font-size:12px" id="tr-${id}"></span></div>
     </div>`;
   $("#modalCard").innerHTML = `<h2>AI 设置</h2>
@@ -692,9 +692,21 @@ function aiSettings(){
   $("#modalCard").onclick = async e => {
     const t = e.target.dataset;
     if (t.clear && confirm(`删除 ${c.providers[t.clear].label} 的 API Key？`)){ try { await save({[t.clear]:{clearKey:true, key:""}}); aiSettings(); } catch(err){ fail(err); } }
-    if (t.test){ const out = $("#tr-"+t.test); out.textContent = "测试中…";
-      try { await save(); const r = await api("/api/ai/test", {method:"POST", body:{provider:t.test}}); out.textContent = `✓ ${r.model} · ${r.ms}ms · “${r.text.trim().slice(0,20)}”`; out.style.color = "#4a7f3a"; }
-      catch(err){ out.textContent = "✗ " + err.message; out.style.color = "#b33"; } }
+    if (t.test){
+      const out = $("#tr-"+t.test), btn = e.target;
+      const typed = $("#modalCard").querySelector(`[data-p="${t.test}"][data-f="key"]`).value.trim();
+      if (!typed && !c.providers[t.test].hasKey){ out.textContent = "请先填写 API Key"; out.style.color = "#b33"; return; }
+      // 先保存刚填写的密钥与模型，再测试；测试可能需要十几秒，期间显示进度
+      btn.disabled = true; out.style.color = ""; const t0 = Date.now();
+      out.textContent = "保存并测试中…";
+      const tick = setInterval(() => out.textContent = `测试中… ${Math.round((Date.now()-t0)/1000)} 秒`, 1000);
+      try {
+        await save(); c.providers = aiCfg.providers;
+        const r = await api("/api/ai/test", {method:"POST", body:{provider:t.test}, timeout: 90e3});
+        out.textContent = `✓ 连接成功 · ${r.model} · ${(r.ms/1000).toFixed(1)} 秒 · “${r.text.trim().slice(0,20)}”`; out.style.color = "#4a7f3a";
+      } catch(err){ out.textContent = "✗ " + err.message; out.style.color = "#b33"; }
+      clearInterval(tick); btn.disabled = false;
+    }
   };
 }
 const SYS = "你是一位博学、挑剔、反商业化的老饕与食物史学者，为一座私人食物博物馆撰写词条。偏爱地域性、手工、有历史与故事的食物；拒绝网红与广告腔。事实不确定时要明说。用中文回答。";
