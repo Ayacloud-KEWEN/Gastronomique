@@ -96,10 +96,22 @@ function toast(m){ const t=$("#toast"); t.textContent=m; t.classList.add("show")
 const chip = t => `<span class="chip t" style="${tc(t)}">${TYPES[t]?.zh||t}</span>`;
 const stars = n => n ? `<span class="stars">${"★".repeat(n)}${"☆".repeat(5-n)}</span>` : "";
 const statusTxt = s => s==="tried" ? `<span class="status tried">● 已品尝</span>` : s==="want" ? `<span class="status want">○ 想尝</span>` : "";
+// 专题：被 ≥3 件藏品以「出现于」指向的藏品（收藏指南、图鉴海报等）
+const MEMBER_LABEL = "出现于";
+const membersOf = id => db.items.filter(x => (x.relations||[]).some(r => r.to===id && r.label===MEMBER_LABEL));
+const collections = () => { const n = {}; for (const x of db.items) for (const r of x.relations||[]) if (r.label===MEMBER_LABEL) n[r.to] = (n[r.to]||0) + 1;
+  return db.items.filter(x => n[x.id] >= 3); };
+const progress = list => ({ total: list.length, tried: list.filter(x => x.status==="tried").length, want: list.filter(x => x.status==="want").length });
+const progBar = p => `<div class="prog"><i style="width:${p.total ? p.tried/p.total*100 : 0}%"></i></div>`;
+function colCard(c){
+  const p = progress(membersOf(c.id)), cv = cover(c);
+  return `<a class="col-card" href="#/item/${encodeURIComponent(c.id)}">${cv?`<div class="col-cover">${mediaEl(cv,"",true)}</div>`:""}
+    <div class="col-info"><b>${esc(c.name)}</b><span class="muted">已尝 ${p.tried} / ${p.total}${p.want?` · 想尝 ${p.want}`:""}</span>${progBar(p)}</div></a>`;
+}
 function card(it){
   const c = cover(it);
-  return `<article class="card${c?" has-cover":""}${inCmp(it.id)?" picked":""}" data-go="${esc(it.id)}">
-    ${c?`<div class="cover">${mediaEl(c,"",true)}</div>`:""}
+  return `<article class="card has-cover${inCmp(it.id)?" picked":""}" data-go="${esc(it.id)}">
+    <div class="cover${c?"":" ph"}" style="${tc(it.type)}">${c?mediaEl(c,"",true):`<span>${esc([...(it.name||"·")][0])}</span>`}</div>
     ${chip(it.type)}
     <h3>${esc(it.name)}</h3>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
     <p>${esc(it.summary)}</p>
@@ -107,16 +119,39 @@ function card(it){
   </article>`;
 }
 const grid = items => items.length ? `<div class="grid">${items.map(card).join("")}</div>` : `<div class="empty">展柜还空着——添一件藏品吧。</div>`;
+// 行内：转义、**粗体**、[[双链]]
+const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/\[\[([^\]]+)\]\]/g, (_,n) => {
+  const t = byName(n.replace(/&amp;/g,"&"));
+  return t ? `<span class="wl" data-go="${esc(t.id)}">${n}</span>` : `<span class="wl missing" data-new="${n}" title="尚未收藏，点击创建">${n}</span>`;
+});
+// 正文：支持常用 Markdown（标题、列表、引用、表格），连续行按块合并
 function renderBody(txt, it){
   const find = id => (it?.media||[]).find(m => m.id===id);
-  return (txt||"").split(/\n+/).filter(Boolean).map(p => {
-    const mm = p.trim().match(/^!\[\[m:([\w-]+)\]\]$/), mu = p.trim().match(/^!\[([^\]]*)\]\((https?:[^)\s]+)\)$/);
-    if (mm){ const m = find(mm[1]); return m ? `<figure>${mediaEl(m)}${m.caption?`<figcaption>${esc(m.caption)}</figcaption>`:""}</figure>` : ""; }
-    if (mu) return `<figure>${mediaEl({url:mu[2], kind:kindOf(mu[2]), caption:mu[1]})}${mu[1]?`<figcaption>${esc(mu[1])}</figcaption>`:""}</figure>`;
-    return "<p>" + esc(p).replace(/\[\[([^\]]+)\]\]/g, (_,n) => {
-    const t = byName(n.replace(/&amp;/g,"&"));
-    return t ? `<span class="wl" data-go="${esc(t.id)}">${n}</span>` : `<span class="wl missing" data-new="${n}" title="尚未收藏，点击创建">${n}</span>`;
-  }) + "</p>"; }).join("");
+  const lines = (txt||"").split("\n").map(l => l.trim()).filter(Boolean);
+  const out = [];
+  const cells = l => l.replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+  for (let i = 0; i < lines.length; i++){
+    const p = lines[i];
+    const mm = p.match(/^!\[\[m:([\w-]+)\]\]$/), mu = p.match(/^!\[([^\]]*)\]\((https?:[^)\s]+)\)$/), h = p.match(/^(#{1,4})\s+(.+)$/);
+    if (mm){ const m = find(mm[1]); if (m) out.push(`<figure>${mediaEl(m)}${m.caption?`<figcaption>${esc(m.caption)}</figcaption>`:""}</figure>`); continue; }
+    if (mu){ out.push(`<figure>${mediaEl({url:mu[2], kind:kindOf(mu[2]), caption:mu[1]})}${mu[1]?`<figcaption>${esc(mu[1])}</figcaption>`:""}</figure>`); continue; }
+    if (h){ const n = Math.min(h[1].length + 1, 4); out.push(`<h${n}>${inline(h[2])}</h${n}>`); continue; }
+    if (p.startsWith("|")){
+      const rows = []; while (i < lines.length && lines[i].startsWith("|")) rows.push(lines[i++]); i--;
+      const body = rows.filter(r => !/^\|[\s:|-]+\|?$/.test(r)).map(cells);
+      const head = rows.length > 1 && /^\|[\s:|-]+\|?$/.test(rows[1]) ? body.shift() : null;
+      out.push(`<div class="table-wrap"><table>${head?`<thead><tr>${head.map(c=>`<th>${inline(c)}</th>`).join("")}</tr></thead>`:""}<tbody>${body.map(r=>`<tr>${r.map(c=>`<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+      continue;
+    }
+    const li = /^([-*]|\d+\.)\s+/;
+    if (li.test(p)){
+      const ol = /^\d/.test(p), items = []; while (i < lines.length && li.test(lines[i])) items.push(lines[i++].replace(li, "")); i--;
+      out.push(`<${ol?"ol":"ul"}>${items.map(x=>`<li>${inline(x)}</li>`).join("")}</${ol?"ol":"ul"}>`); continue;
+    }
+    if (p.startsWith(">")){ out.push(`<blockquote>${inline(p.replace(/^>\s*/, ""))}</blockquote>`); continue; }
+    out.push(`<p>${inline(p)}</p>`);
+  }
+  return out.join("");
 }
 function radar(fl, size=220){
   const keys = Object.keys(FLAVORS), c=size/2, R=c-34, n=keys.length;
@@ -173,7 +208,11 @@ function home(){
   const ex = pool[day % Math.max(pool.length,1)];
   const tried = items.filter(i=>i.status==="tried").length, want = items.filter(i=>i.status==="want").length;
   const regions = new Set(items.map(i=>(i.region||"").split("·")[0].trim()).filter(Boolean));
-  const recent = [...items].sort((a,b)=>(b.updated||"").localeCompare(a.updated||"")).slice(0,8);
+  const recent = [...items].sort((a,b)=>(b.created||"").localeCompare(a.created||"")).slice(0,8);
+  // 最近一批：与最新一件同一天入藏的数量
+  const lastDay = (recent[0]?.created||"").slice(0,10), batch = lastDay ? items.filter(i => (i.created||"").startsWith(lastDay)).length : 0;
+  const cols = collections().map(c => ({ c, p: progress(membersOf(c.id)) }))
+    .sort((a,b) => (b.p.want>0) - (a.p.want>0) || b.p.tried/b.p.total - a.p.tried/a.p.total).slice(0,3);
   app.innerHTML = `
   <section class="hero">
     ${ex ? `<div class="exhibit${cover(ex)?" with-media":""}">${cover(ex)?`<div class="exhibit-media">${mediaEl(cover(ex))}</div>`:""}<div class="exhibit-text">
@@ -183,19 +222,22 @@ function home(){
       <button class="more-toggle" hidden>展开全文 ↓</button>
       <div class="plaque">${chip(ex.type)}<span>${esc(ex.region)}</span><a href="#/item/${encodeURIComponent(ex.id)}" style="color:var(--accent);margin-left:auto">进入展柜 →</a></div>
     </div></div>` : `<div class="exhibit"><h1>欢迎</h1><p>你的私人食物博物馆还没有藏品。</p></div>`}
-    <div class="stats">
-      <div class="stat"><b>${items.length}</b><span>藏品</span></div>
-      <div class="stat"><b>${tried}</b><span>已品尝</span></div>
-      <div class="stat"><b>${want}</b><span>想尝清单</span></div>
-      <div class="stat"><b>${regions.size}</b><span>地区</span></div>
-      <div class="stat"><b>${edges().length}</b><span>知识连接</span></div>
-      <div class="stat"><b>${items.filter(i=>i.story||i.type==="story").length}</b><span>奇闻轶事</span></div>
+    <div class="side-col">
+      <div class="stats">
+        <a class="stat" href="#/catalog"><b>${items.length}</b><span>藏品</span></a>
+        <a class="stat" href="#/atlas?tab=tried"><b>${tried}</b><span>已品尝</span></a>
+        <a class="stat" href="#/atlas?tab=want"><b>${want}</b><span>想尝</span></a>
+        <a class="stat" href="#/catalog?by=region"><b>${regions.size}</b><span>地区</span></a>
+        <a class="stat" href="#/graph"><b>${edges().length}</b><span>连接</span></a>
+        <a class="stat" href="#/stories"><b>${items.filter(i=>i.story||i.type==="story").length}</b><span>轶事</span></a>
+      </div>
+      ${cols.length?`<div class="panel home-cols"><div class="section-h" style="margin:0 0 8px"><h4 style="margin:0">专题进度</h4><a class="muted" href="#/atlas?tab=collections">全部 →</a></div>${cols.map(x=>colCard(x.c)).join("")}</div>`:""}
       <div class="quote">${QUOTES[day%QUOTES.length]}</div>
     </div>
   </section>
   <div class="section-h"><h2>展厅分区</h2><span class="muted">按类别浏览</span></div>
   <div class="seg">${Object.entries(TYPES).map(([k,v])=>`<button onclick="location.hash='#/discover?type=${k}'" style="${tc(k)}"><span class="dot" style="display:inline-block;margin-right:6px"></span>${v.zh} · ${items.filter(i=>i.type===k).length}</button>`).join("")}</div>
-  <div class="section-h"><h2>最近入藏</h2><a class="muted" href="#/discover">全部 →</a></div>
+  <div class="section-h"><h2>最近入藏</h2><span class="muted">${batch > 8 ? `${lastDay.slice(5).replace("-","月")}日一批入藏 ${batch} 件 · ` : ""}<a href="#/catalog?by=time" style="color:var(--accent)">全部 →</a></span></div>
   ${grid(recent)}`;
   const body = app.querySelector(".exhibit-body"), more = app.querySelector(".more-toggle");
   if (body && body.scrollHeight > body.clientHeight + 4) {
@@ -204,6 +246,7 @@ function home(){
   } else if (body) body.classList.remove("clamped");
 }
 
+const PAGE = 36;
 function discover(params){
   const st = { q: params.get("q")||"", type: params.get("type")||"", tag: params.get("tag")||"", sort: "updated" };
   app.innerHTML = `
@@ -223,7 +266,19 @@ function discover(params){
       (!q || [i.name,i.alt,i.region,i.summary,i.body,i.story,(i.tags||[]).join(" ")].join(" ").toLowerCase().includes(q)));
     const s = { updated:(a,b)=>(b.updated||"").localeCompare(a.updated||""), name:(a,b)=>a.name.localeCompare(b.name,"zh"), rating:(a,b)=>(b.rating||0)-(a.rating||0), region:(a,b)=>(a.region||"").localeCompare(b.region||"","zh") }[st.sort];
     list.sort(s);
-    $("#res").innerHTML = grid(list); $("#cnt").textContent = `${list.length} 件藏品`;
+    // 分批渲染：先画一页，滚到底部或点「加载更多」再接着画
+    let shown = 0;
+    const more = () => {
+      const next = list.slice(shown, shown += PAGE);
+      const g = $("#res .grid"); if (g) g.insertAdjacentHTML("beforeend", next.map(card).join(""));
+      const left = list.length - shown, b = $("#moreBtn");
+      if (b){ b.hidden = left <= 0; b.textContent = `加载更多（还有 ${left} 件）`; }
+    };
+    $("#res").innerHTML = list.length ? `<div class="grid"></div><div class="load-more"><button id="moreBtn">加载更多</button></div>` : grid([]);
+    if (list.length){ more(); $("#moreBtn").onclick = more;
+      st.io?.disconnect(); st.io = new IntersectionObserver(es => es[0].isIntersecting && shown < list.length && more(), { rootMargin: "600px" });
+      st.io.observe($("#moreBtn")); }
+    $("#cnt").textContent = `${list.length} 件藏品`;
     document.querySelectorAll("#ft button").forEach(b => b.classList.toggle("on", b.dataset.t===st.type));
     $("#ftag").innerHTML = allTags.map(t=>`<span class="tag" data-tag="${esc(t)}" style="${t===st.tag?"background:var(--accent);color:#fff":""}">#${esc(t)}</span>`).join("");
   };
@@ -239,9 +294,13 @@ function discover(params){
 
 function atlas(params){
   const tab = params.get("tab") || "tried";
-  const tabs = {tried:"已品尝",want:"想尝清单",journal:"品尝日志"};
+  const tabs = {tried:"已品尝",want:"想尝清单",collections:"专题收藏",journal:"品尝日志"};
   let body;
-  if (tab==="journal"){
+  if (tab==="collections"){
+    const cs = collections();
+    body = cs.length ? `<div class="col-grid">${cs.map(colCard).join("")}</div>`
+      : `<div class="empty">当 3 件以上藏品在「关系」中以「出现于」指向同一件藏品（如一份收藏指南），它就成为一个专题。</div>`;
+  } else if (tab==="journal"){
     const entries = db.items.flatMap(i => (i.journal||[]).map(j => ({...j, it:i}))).sort((a,b)=>b.date.localeCompare(a.date));
     body = entries.length ? entries.map(e=>`<div class="entry"><time>${esc(e.date)}</time> · <a href="#/item/${encodeURIComponent(e.it.id)}" style="color:var(--accent)">${esc(e.it.name)}</a>${e.place?` · <span class="muted">${esc(e.place)}</span>`:""}${priceLine(e)}${e.text?`<div class="prose" style="font-size:15px">${esc(e.text)}</div>`:""}</div>`).join("")
       : `<div class="empty">在任意藏品页面写下「品尝日志」，它们会汇集在这里。</div>`;
@@ -260,6 +319,41 @@ function stories(){
     <div class="story-box" style="margin:12px 0 0">${esc(i.type==="story" ? i.summary : i.story)}</div></div>`).join("") : `<div class="empty">还没有故事。</div>`}`;
 }
 
+// 专题页的收藏清单：按国家分组，勾选即标记「已品尝」
+function collectionPanel(it){
+  const ms = membersOf(it.id);
+  if (ms.length < 3) return "";
+  const f = cfg.colFilter || "all", p = progress(ms);
+  const key = x => x.alt || x.name;
+  ms.sort((a,b) => key(a).localeCompare(key(b), "zh", { numeric: true }));
+  const groups = new Map();
+  for (const x of ms){ const g = countryName(countryOf(x)) || (x.region||"").split("·")[0].trim() || "其他"; (groups.get(g) || groups.set(g, []).get(g)).push(x); }
+  const show = x => f==="all" || (f==="todo" ? x.status!=="tried" : x.status==="tried");
+  const row = x => `<li class="cl-row${x.status==="tried"?" done":""}"${show(x)?"":" hidden"}>
+    <label class="cl-check" title="${x.status==="tried"?"取消已品尝":"标记为已品尝"}"><input type="checkbox" data-cl="${esc(x.id)}" ${x.status==="tried"?"checked":""} ${isAdmin()?"":"disabled"}><i></i></label>
+    ${cover(x)?`<span class="cl-thumb">${mediaEl(cover(x),"",true)}</span>`:""}
+    <a href="#/item/${encodeURIComponent(x.id)}" class="cl-name">${esc(x.name)}${(x.tags||[]).includes("首选")?` <span class="cl-top">首选</span>`:""}</a>
+    <span class="cl-meta">${stars(x.rating)||statusTxt(x.status)}</span></li>`;
+  return `<section class="collection" id="collection">
+    <div class="cl-head"><h3>收藏清单</h3><span class="muted">已尝 <b>${p.tried}</b> / ${p.total}${p.want?` · 想尝 ${p.want}`:""}</span>
+      <div class="seg" id="clSeg">${[["all","全部"],["todo","未尝"],["done","已尝"]].map(([k,v])=>`<button class="sm ${f===k?"on":""}" data-f="${k}">${v}</button>`).join("")}</div></div>
+    ${progBar(p)}
+    ${[...groups].map(([g, xs]) => { const gp = progress(xs); return `<div class="cl-group"><div class="cl-gh"><span>${esc(g)}</span><span class="muted">${gp.tried}/${gp.total}</span></div><ul>${xs.map(row).join("")}</ul></div>`; }).join("")}
+  </section>`;
+}
+function bindCollection(it){
+  const box = $("#collection"); if (!box) return;
+  $("#clSeg").onclick = e => { const b = e.target.closest("button"); if (!b) return; cfg.colFilter = b.dataset.f; saveCfg(); const y = scrollY; route(); scrollTo(0, y); };
+  box.onchange = e => {
+    const id = e.target.dataset.cl; if (!id) return;
+    const status = e.target.checked ? "tried" : "want", x = byId(id);
+    api("/api/items/"+encodeURIComponent(id), {method:"PATCH", body:{status}}).then(r => { upsert(r); }, async err => {
+      if (!isOffline(err)) { e.target.checked = !e.target.checked; return fail(err); }
+      await queueOp({type:"patch", id, body:{status}}); applyPending(); toast("已离线保存，联网后自动同步");
+    }).then(() => { const y = scrollY; route(); scrollTo(0, y); });
+    if (x) x.status = status;
+  };
+}
 function item(_, id){
   const it = byId(id);
   if (!it) { app.innerHTML = `<div class="empty">找不到这件藏品。</div>`; return; }
@@ -272,6 +366,7 @@ function item(_, id){
       <h1>${esc(it.name)}</h1>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
       ${cover(it) && !(it.body||"").includes("m:"+cover(it).id) ? `<figure class="lead">${mediaEl(cover(it))}${cover(it).caption?`<figcaption>${esc(cover(it).caption)}</figcaption>`:""}</figure>` : ""}
       <p class="prose" style="font-size:18px;margin-top:18px">${esc(it.summary)}</p>
+      ${collectionPanel(it)}
       <div class="prose">${renderBody(it.body, it)}</div>
       ${it.story?`<div class="story-box"><div class="eyebrow" style="margin-bottom:6px">轶事</div>${esc(it.story)}</div>`:""}
       ${it.source?`<p class="muted" style="font-size:13px">来源：${esc(it.source)}</p>`:""}
@@ -332,6 +427,7 @@ function item(_, id){
     const id = $("#jid").value;
     api(id ? `/api/journal/${id}` : `/api/items/${encodeURIComponent(it.id)}/journal`, {method: id ? "PUT" : "POST", body}).then(refresh,
       e => isOffline(e) ? offlineSave({type:"journal", id:it.id, body:{...body, id: id || undefined}}) : fail(e)); };
+  bindCollection(it);
   $("#cmpBtn").onclick = () => { if (toggleCompare(it.id)) $("#cmpBtn").textContent = inCmp(it.id) ? "✓ 已在对比中" : "⚖ 加入对比"; };
   initItemMap(it);
   app.querySelectorAll("[data-delj]").forEach(b => b.onclick = () => { if(confirm("删除这条日志？"))
