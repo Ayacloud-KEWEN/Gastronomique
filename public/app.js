@@ -295,7 +295,7 @@ function item(_, id){
       ${healthPanel(it.health)}
       ${hasFlavor(it.flavor)?`<div class="panel"><h4>风味轮廓</h4><div style="text-align:center">${radar(it.flavor)}</div></div>`:""}
       <div class="panel"><h4>档案</h4><dl class="kv">
-        <dt>类别</dt><dd>${TYPES[it.type]?.zh}</dd>${it.country?`<dt>国家</dt><dd><a href="#/catalog?by=region" style="color:var(--accent)">${esc(countryName(it.country))}</a></dd>`:""}<dt>地区</dt><dd>${esc(it.region)||"—"}</dd>
+        <dt>类别</dt><dd>${TYPES[it.type]?.zh}</dd>${countryOf(it)?`<dt>国家</dt><dd><a href="#/catalog?by=region" style="color:var(--accent)">${esc(countryName(countryOf(it)))}</a></dd>`:""}<dt>地区</dt><dd>${esc(it.region)||"—"}</dd>
         <dt>入藏</dt><dd>${(it.created||"").slice(0,10)}</dd></dl>
         <div class="tags" style="margin-top:10px">${(it.tags||[]).map(t=>`<a class="tag" href="#/discover?tag=${encodeURIComponent(t)}">#${esc(t)}</a>`).join("")}</div></div>
       <div class="panel"><h4>知识连接 · ${nb.length}</h4>
@@ -1026,6 +1026,8 @@ const COUNTRIES = {
   XX:["多国 / 跨地区",["全球","多国","斯堪的纳维亚","scandinavia","地中海","古罗马"]],
 };
 const countryName = c => COUNTRIES[c]?.[0] || "";
+// 显示用的国家：已保存的优先，否则按地区文字推断（老数据无需逐件重新保存）
+const countryOf = it => it.country || inferCountry(it.region);
 // 从「国家 · 地区」等文字推断国家：按词从左到右，命中第一个即返回
 function inferCountry(...texts){
   for (const t of texts) {
@@ -1078,15 +1080,17 @@ function catalog(params){
   const draw = () => {
     const q = st.q.trim().toLowerCase();
     const list = db.items.filter(i => (!st.status || i.status===st.status) && (!st.tag || (i.tags||[]).includes(st.tag)) &&
-      (!q || [i.name, i.alt, i.region, countryName(i.country), (i.tags||[]).join(" "), i.summary].join(" ").toLowerCase().includes(q)));
+      (!q || [i.name, i.alt, i.region, countryName(countryOf(i)), (i.tags||[]).join(" "), i.summary].join(" ").toLowerCase().includes(q)));
     $("#ctCount").textContent = `${list.length} / ${db.items.length} 件`;
     $("#ctTags").innerHTML = allTags.map(t => `<span class="tag" data-tag="${esc(t)}" style="${t===st.tag?"background:var(--accent);color:#fff":""}">#${esc(t)}</span>`).join("");
     const expand = !!q || !!st.tag || list.length <= 40;
     let html = "", letters = [];
-    $("#ctTools").innerHTML = "";
+    const guessed = db.items.filter(i => !i.country && inferCountry(i.region)).length;
+    $("#ctTools").innerHTML = st.by === "region" && guessed && isAdmin()
+      ? `<div class="ct-fix">其中 ${guessed} 件的国家是按地区文字自动归类的，尚未保存。<button class="sm" id="ctInfer">保存为正式数据</button></div>` : "";
     if (st.by === "region"){
       const by = new Map();
-      for (const it of list) { const c = it.country || "";
+      for (const it of list) { const c = countryOf(it);
         if (!by.has(c)) by.set(c, new Map());
         const sub = subRegion(it) || "（未细分）"; const m = by.get(c); m.set(sub, [...(m.get(sub)||[]), it]); }
       const keys = [...by.keys()].sort((a,b) => (!a) - (!b) || (a==="XX") - (b==="XX") || PY_COLLATOR.compare(countryName(a), countryName(b)));
@@ -1096,7 +1100,7 @@ function catalog(params){
         const inner = subs.length === 1 ? subs[0][1].sort(byPinyin).map(row).join("")
           : subs.map(([s,l]) => `<div class="ct-sub">${esc(s)} <span>${l.length}</span></div>${l.sort(byPinyin).map(row).join("")}`).join("");
         const title = c ? esc(countryName(c) || c) : "未标国家";
-        const fix = !c && isAdmin() ? `<div class="ct-fix"><button class="sm" id="ctInfer">按地区文字自动推断国家</button><span class="muted">或在藏品编辑页手动选择</span></div>` : "";
+        const fix = !c && isAdmin() ? `<div class="ct-fix muted">地区文字里没有可识别的国家，请在藏品编辑页选择</div>` : "";
         return `<details class="ct-group" ${expand || keys.length <= 6 ? "open" : ""} id="g-${c||"none"}"><summary><span>${title}</span><b>${n}</b></summary>${fix}${inner}</details>`;
       }).join("");
     } else if (st.by === "az"){
@@ -1179,7 +1183,7 @@ async function dupes(){
   const list = findDuplicates(ign);
   const card = it => `<div class="dup-side" style="${tc(it.type)}">${chip(it.type)}
       <a class="dup-name" href="#/item/${encodeURIComponent(it.id)}">${esc(it.name)}</a>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
-      <div class="muted dup-meta">${esc(it.region||"—")}${it.country?` · ${countryName(it.country)}`:""}</div>
+      <div class="muted dup-meta">${esc(it.region||"—")}${countryOf(it)?` · ${countryName(countryOf(it))}`:""}</div>
       <p>${esc((it.summary||"").slice(0,90))}</p>
       <div class="muted dup-meta">日志 ${(it.journal||[]).length} · 媒体 ${(it.media||[]).length} · 关系 ${(it.relations||[]).length} · 入藏 ${(it.created||"").slice(0,10)}</div></div>`;
   app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>疑似重复 · Duplicates</h2><span class="muted">${list.length} 组</span></div>
