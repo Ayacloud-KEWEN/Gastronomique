@@ -178,8 +178,9 @@ function home(){
   <section class="hero">
     ${ex ? `<div class="exhibit${cover(ex)?" with-media":""}">${cover(ex)?`<div class="exhibit-media">${mediaEl(cover(ex))}</div>`:""}<div class="exhibit-text">
       <div class="eyebrow">今日展品 · Exhibit No. ${String(items.indexOf(ex)+1).padStart(3,"0")}</div>
-      <h1>${esc(ex.name)}</h1><div class="alt">${esc(ex.alt)}</div>
-      <p>${esc(ex.summary)}</p>${ex.story?`<div class="story-box">${esc(ex.story)}</div>`:""}
+      <h1>${esc(ex.name)}</h1><div class="exhibit-body clamped"><div class="alt">${esc(ex.alt)}</div>
+      <p>${esc(ex.summary)}</p>${ex.story?`<div class="story-box">${esc(ex.story)}</div>`:""}</div>
+      <button class="more-toggle" hidden>展开全文 ↓</button>
       <div class="plaque">${chip(ex.type)}<span>${esc(ex.region)}</span><a href="#/item/${encodeURIComponent(ex.id)}" style="color:var(--accent);margin-left:auto">进入展柜 →</a></div>
     </div></div>` : `<div class="exhibit"><h1>欢迎</h1><p>你的私人食物博物馆还没有藏品。</p></div>`}
     <div class="stats">
@@ -196,6 +197,11 @@ function home(){
   <div class="seg">${Object.entries(TYPES).map(([k,v])=>`<button onclick="location.hash='#/discover?type=${k}'" style="${tc(k)}"><span class="dot" style="display:inline-block;margin-right:6px"></span>${v.zh} · ${items.filter(i=>i.type===k).length}</button>`).join("")}</div>
   <div class="section-h"><h2>最近入藏</h2><a class="muted" href="#/discover">全部 →</a></div>
   ${grid(recent)}`;
+  const body = app.querySelector(".exhibit-body"), more = app.querySelector(".more-toggle");
+  if (body && body.scrollHeight > body.clientHeight + 4) {
+    more.hidden = false;
+    more.onclick = () => { const c = body.classList.toggle("clamped"); more.textContent = c ? "展开全文 ↓" : "收起 ↑"; };
+  } else if (body) body.classList.remove("clamped");
 }
 
 function discover(params){
