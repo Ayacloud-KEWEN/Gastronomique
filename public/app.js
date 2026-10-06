@@ -324,10 +324,22 @@ function collectionPanel(it){
   const ms = membersOf(it.id);
   if (ms.length < 3) return "";
   const f = cfg.colFilter || "all", p = progress(ms);
-  const key = x => x.alt || x.name;
-  ms.sort((a,b) => key(a).localeCompare(key(b), "zh", { numeric: true }));
-  const groups = new Map();
-  for (const x of ms){ const g = countryName(countryOf(x)) || (x.region||"").split("·")[0].trim() || "其他"; (groups.get(g) || groups.set(g, []).get(g)).push(x); }
+  // 排序：外文名带编号（No.01）时按编号，否则按入藏顺序
+  ms.sort(ms.some(x => /No\.\s*\d/.test(x.alt||"")) ? (a,b) => (a.alt||"").localeCompare(b.alt||"", "zh", { numeric: true })
+    : (a,b) => (a.created||"").localeCompare(b.created||"") || a.name.localeCompare(b.name, "zh"));
+  // 分组：有「属于菜系」按菜系；否则按大家不共有的第一个标签；再退回国家或地区
+  const multi = new Set(ms.map(x => countryOf(x)).filter(Boolean)).size > 1;
+  const common = (ms[0]?.tags||[]).filter(t => ms.every(x => (x.tags||[]).includes(t)));
+  const groupOf = x => {
+    const c = (x.relations||[]).find(r => r.label==="属于菜系" && byId(r.to));
+    if (c) return { k: byId(c.to).name, at: (it.relations||[]).findIndex(r => r.to===c.to) };
+    const t = (x.tags||[]).find(t => !common.includes(t));
+    if (t) return { k: t };
+    return { k: (multi && countryName(countryOf(x))) || (x.region||"").split("·")[0].trim() || "其他" };
+  };
+  const groups = new Map(), at = {};
+  for (const x of ms){ const { k, at: i } = groupOf(x); if (i != null && i >= 0) at[k] = i; (groups.get(k) || groups.set(k, []).get(k)).push(x); }
+  const gs = [...groups].sort((a,b) => (at[a[0]] ?? 1e9) - (at[b[0]] ?? 1e9));
   const show = x => f==="all" || (f==="todo" ? x.status!=="tried" : x.status==="tried");
   const row = x => `<li class="cl-row${x.status==="tried"?" done":""}"${show(x)?"":" hidden"}>
     <label class="cl-check" title="${x.status==="tried"?"取消已品尝":"标记为已品尝"}"><input type="checkbox" data-cl="${esc(x.id)}" ${x.status==="tried"?"checked":""} ${isAdmin()?"":"disabled"}><i></i></label>
@@ -338,7 +350,7 @@ function collectionPanel(it){
     <div class="cl-head"><h3>收藏清单</h3><span class="muted">已尝 <b>${p.tried}</b> / ${p.total}${p.want?` · 想尝 ${p.want}`:""}</span>
       <div class="seg" id="clSeg">${[["all","全部"],["todo","未尝"],["done","已尝"]].map(([k,v])=>`<button class="sm ${f===k?"on":""}" data-f="${k}">${v}</button>`).join("")}</div></div>
     ${progBar(p)}
-    ${[...groups].map(([g, xs]) => { const gp = progress(xs); return `<div class="cl-group"><div class="cl-gh"><span>${esc(g)}</span><span class="muted">${gp.tried}/${gp.total}</span></div><ul>${xs.map(row).join("")}</ul></div>`; }).join("")}
+    ${gs.map(([g, xs]) => { const gp = progress(xs); return `<div class="cl-group"><div class="cl-gh"><span>${esc(g)}</span><span class="muted">${gp.tried}/${gp.total}</span></div><ul>${xs.map(row).join("")}</ul></div>`; }).join("")}
   </section>`;
 }
 function bindCollection(it){
