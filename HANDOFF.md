@@ -40,7 +40,9 @@ public/
   app.js          全部前端逻辑（单个 IIFE）。按注释分段：
                   API · media · 维基链接/边 · UI 工具 · 路由与各页面
                   · 编辑器(editor) · 知识网络(graph) · 品味档案 · AI
-                  · 价格/地图/对比（features 段）· 命令面板 · 启动(boot)
+                  · 价格/地图/对比 · 国家/目录/重复检测/整理文档/离线队列/版本更新
+                  · 命令面板 · 启动(boot)
+  sw.js           Service Worker：外壳缓存优先、API 网络优先（6 秒超时回落缓存）、媒体缓存优先
   share.js        分享：Canvas 版式(draw*)、文案生成(*Text)、ZIP 打包
   styles.css      样式；颜色变量在 :root（含 --t-<类别>），末尾按功能追加
   seed.js         空库时的示例藏品
@@ -48,7 +50,8 @@ public/
 server/
   src/index.js    路由、鉴权钩子、上传、导入导出、启动
   src/items.js    藏品读写与校验（clean）；SELECT 聚合关系/日志/媒体
-  src/ai.js       Claude / DeepSeek 调用，密钥加密
+  src/ai.js       Claude / DeepSeek 调用，密钥加密；Claude 可附带图片 / PDF 原件
+  src/docs.js     文档解析：docx（mammoth，保留表格与图片）、pdf（unpdf）、网页、纯文本
   src/thumbs.js   缩略图（sharp，视频经 ffmpeg 取帧）
   src/auth.js     scrypt 密码、会话、登录限速
   migrations/     00N_*.sql，启动时自动执行
@@ -61,6 +64,9 @@ scripts/          pi-install / update / migrate-export / migrate-import / backup
 - 新页面：写函数 → 加入 `route()` 的映射 → `index.html` 顶部导航与「更多」面板各加一项。
 - `window.G` 是给 share.js 的只读上下文；新增分享用的数据要在这里导出。
 - 编辑器 `editor(item, preset, focus)`：`collect()` 汇总表单；弹窗 `dataset.lock` 防误关。
+- **离线**：`api()` 在网络失败、超时（普通 15 秒、上传 3 分钟）或手机离线时抛出 `{offline:true}`；调用方用 `isOffline(e)` 判断后 `queueOp()` 入队。队列操作类型：`create`（临时 id `tmp-*`）/`update`/`patch`/`journal`；离线照片存为 `local-*` 媒体，`uploadLocalMedia()` 负责补传。新增写操作时，记得同样处理离线分支。
+- **版本**：`/api/version` 与 `/sw.js` 里的版本号 = 前端外壳文件的哈希。改了 `public/` 就是新版本；页面通过 Service Worker 的 waiting 状态（或 http 环境下轮询版本号）显示「刷新」按钮。新增需要离线可用的静态文件时，加到 `sw.js` 的 `SHELL` 和 `index.js` 的 `SHELL` 列表。
+- **国家**：`items.country` 为 ISO 两位代码（`XX` = 多国）；`inferCountry()` 只看地区文字。
 
 **后端约定**
 - 新字段：写迁移 → `items.js` 的 `SELECT`/`shape`/`clean`/`saveItem` 参数 → 前端。
@@ -78,6 +84,11 @@ scripts/          pi-install / update / migrate-export / migrate-import / backup
 7. 定时保存草稿后关闭弹窗，要 `clearTimeout`，否则草稿会被写回。
 8. Nominatim 在 Git Bash 中用 curl 查含 `ø` 等字符的地名会因编码失败；在 Node 或浏览器里请求正常。查询时遵守每秒 1 次。
 9. 分享图只能画同源图片（外链图片会污染画布导致无法导出）。
+10. **弱网下请求可能长时间挂起而不是失败**：所有写请求都必须有超时（已在 `api()` 里统一处理），否则离线保存会迟迟不触发。
+11. 推断国家不要使用外文名：「俄罗斯鲟」「波斯鲟」是物种名，不是产地。
+12. 重复检测时，至少一方必须是**名称本身**：外文名常被写成地点或描述（如「Tromsø」「Italian caviar」），两个外文名相同不算重复。
+13. 非 HTTPS（局域网 http）下 `window.caches`、`navigator.serviceWorker` 都不存在，访问前要判断，并写成 `window.caches?.`。
+14. 测试 Service Worker 更新时，改前端文件后需要 `reg.update()` 再点刷新；页面处于后台时浏览器不会触发可见性检查。
 
 ## 6. 部署与更新
 
@@ -89,9 +100,10 @@ scripts/          pi-install / update / migrate-export / migrate-import / backup
 ## 7. 建议的下一步
 
 1. 跟进树莓派部署与 Tailscale HTTPS 是否成功；部署后在树莓派上跑一次 `smoke-test.mjs`（它会创建并删除测试数据）。
-2. 配置每日备份 cron，并考虑异地备份。
-3. 用户感兴趣的新功能：旅行清单视图、离线可用（Service Worker）。
-4. 用真实 API Key 跑通 AI 编目与发现。
+2. 树莓派上：「目录 → 地区 → 未标国家 → 按地区文字自动推断国家」，整理已有数据。
+3. 配置每日备份 cron，并考虑异地备份。
+4. 用真实 API Key 跑通 AI 编目、发现与整理文档。
+5. 用户感兴趣的新功能：旅行清单视图、反向链接。
 
 ## 8. 交接检查清单
 

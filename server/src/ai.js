@@ -84,19 +84,32 @@ export async function hasAI() { return (await resolved()).available.length > 0; 
 
 const err = (msg, code = 502) => Object.assign(new Error(msg), { statusCode: code, expose: true });   // expose：把上游错误原因展示给馆长
 
-export async function complete({ prompt, system, provider, maxTokens = 4000 }) {
+// 实际会使用的提供方 id（未配置时为空）
+export async function resolveProvider(provider) {
+  const r = await resolved();
+  return provider && r.providers[provider]?.key ? provider : r.default;
+}
+
+// attachments：[{ kind:"image", mime, data(base64) } | { kind:"pdf", data(base64) }]，仅 Claude 支持
+export async function complete({ prompt, system, provider, maxTokens = 4000, attachments = [], timeoutMs = 120e3 }) {
   const r = await resolved();
   const id = provider && r.providers[provider]?.key ? provider : r.default;
   if (!id) throw err("尚未配置 AI：请在「AI 探索 → ⚙ 设置」中填写 Claude 或 DeepSeek 的 API Key", 501);
   const c = r.providers[id];
-  const ctl = AbortSignal.timeout(120e3);
+  const ctl = AbortSignal.timeout(timeoutMs);
   let res, j;
   try {
     if (id === "claude") {
+      const content = attachments.length ? [
+        ...attachments.map(a => a.kind === "pdf"
+          ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: a.data } }
+          : { type: "image", source: { type: "base64", media_type: a.mime, data: a.data } }),
+        { type: "text", text: String(prompt || "") },
+      ] : String(prompt || "");
       res = await fetch(`${c.baseUrl}/v1/messages`, {
         method: "POST", signal: ctl,
         headers: { "content-type": "application/json", "x-api-key": c.key, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: c.model, max_tokens: maxTokens, system: String(system || ""), messages: [{ role: "user", content: String(prompt || "") }] }),
+        body: JSON.stringify({ model: c.model, max_tokens: maxTokens, system: String(system || ""), messages: [{ role: "user", content }] }),
       });
       j = await res.json().catch(() => ({}));
       if (!res.ok) throw err(`Claude：${j.error?.message || res.status}`);
@@ -105,7 +118,7 @@ export async function complete({ prompt, system, provider, maxTokens = 4000 }) {
     res = await fetch(`${c.baseUrl}/chat/completions`, {
       method: "POST", signal: ctl,
       headers: { "content-type": "application/json", authorization: `Bearer ${c.key}` },
-      body: JSON.stringify({ model: c.model, max_tokens: maxTokens, stream: false,
+      body: JSON.stringify({ model: c.model, max_tokens: Math.min(maxTokens, 8192), stream: false,
         messages: [...(system ? [{ role: "system", content: String(system) }] : []), { role: "user", content: String(prompt || "") }] }),
     });
     j = await res.json().catch(() => ({}));

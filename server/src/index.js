@@ -13,7 +13,8 @@ import { q, tx, migrate, pool } from "./db.js";
 import * as auth from "./auth.js";
 import { makeThumb, backfillThumbs } from "./thumbs.js";
 import * as ai from "./ai.js";
-import { MEDIA_DIR, listItems, getItem, saveItem, deleteItem, slug, cleanupOrphans } from "./items.js";
+import { extract } from "./docs.js";
+import { MEDIA_DIR, listItems, getItem, saveItem, deleteItem, mergeItems, slug, cleanupOrphans } from "./items.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(process.env.PUBLIC_DIR || path.join(here, "..", "..", "public"));
@@ -29,7 +30,7 @@ await fsp.mkdir(MEDIA_DIR, { recursive: true });
 await app.register(fstatic, { root: MEDIA_DIR, prefix: "/media/", decorateReply: false, maxAge: "30d", immutable: true });
 
 /* ---------- 鉴权：/api 与 /media 需要登录，写操作需要管理员 ---------- */
-const OPEN = new Set(["/api/login", "/api/me", "/api/health"]);
+const OPEN = new Set(["/api/login", "/api/me", "/api/health", "/api/version"]);
 app.decorateRequest("user", null);
 app.addHook("onRequest", async (req, reply) => {
   const url = req.url.split("?")[0];
@@ -104,6 +105,23 @@ app.patch("/api/items/:id", async (req, reply) => {
   return r.rowCount ? getItem(req.params.id) : reply.code(404).send({ error: "找不到" });
 });
 app.delete("/api/items/:id", async req => { await deleteItem(req.params.id); return { ok: true }; });
+// 合并重复：from 并入 :id，然后删除 from
+app.post("/api/items/:id/merge", async req => mergeItems(req.params.id, String(req.body?.from || "")));
+
+/* ---------- 偏好设置（馆长）：如「不是重复」的忽略列表 ---------- */
+const PREF_KEYS = new Set(["dupIgnore"]);
+app.get("/api/prefs/:key", async (req, reply) => {
+  if (!PREF_KEYS.has(req.params.key)) return reply.code(404).send({ error: "未知设置" });
+  if (req.user.role !== "admin") return reply.code(403).send({ error: "只有馆长可以查看" });
+  return (await q("SELECT value FROM settings WHERE key=$1", ["pref:" + req.params.key])).rows[0]?.value ?? null;
+});
+app.put("/api/prefs/:key", async (req, reply) => {
+  if (!PREF_KEYS.has(req.params.key)) return reply.code(404).send({ error: "未知设置" });
+  const v = JSON.stringify(req.body ?? null);
+  if (v.length > 200000) return reply.code(413).send({ error: "内容过大" });
+  await q("INSERT INTO settings(key,value,updated_at) VALUES ($1,$2,now()) ON CONFLICT (key) DO UPDATE SET value=$2, updated_at=now()", ["pref:" + req.params.key, v]);
+  return { ok: true };
+});
 
 // 品尝日志字段清洗：笔记与价格至少填一项
 function journalFields(b = {}) {
@@ -207,6 +225,77 @@ app.post("/api/ai/test", async req => {
 app.post("/api/ai", async req => {
   const { prompt, system, provider } = req.body || {};
   return ai.complete({ prompt, system, provider });
+});
+
+/* ---------- AI 整理文档：文件 / 网址 / 文字 → 待审核的藏品与关系 ---------- */
+const ORGANIZE_SYS = `你是一座私人食物博物馆的编目员。把用户提供的资料整理成藏品条目，忠实于原文：
+- 只写资料中有的事实，不补充、不臆测；资料里的提醒、存疑与“不要误读”的说明要保留。
+- 资料中的表格、图片（如有）里的信息同样要整理进对应条目。
+- 用中文撰写；外文名放在 alt。
+- 只输出 JSON，不要任何解释或代码块标记。`;
+const ORGANIZE_SCHEMA = `{
+ "items":[{"ref":"r1","type":"ingredient|dish|cuisine|beverage|restaurant|producer|region|culture|event|story",
+  "name":"中文名","alt":"原文/外文名","region":"国家 · 地区","country":"ISO 3166-1 两位代码，如 NO、FR、CN；多国用 XX；不确定留空",
+  "summary":"一句话","body":"正文，可用 [[名称]] 指向同批或已有藏品；表格内容逐条写清","story":"轶事或冷知识，没有则留空",
+  "tags":["…"],"flavor":{"sweet":0,"sour":0,"salty":0,"bitter":0,"umami":0,"spicy":0,"rich":0,"aroma":0},
+  "health":{"ingredients":["资料提到的主要配料"],"levels":{}},"existing":"若与已有藏品是同一事物，填已有藏品名称，否则留空"}],
+ "relations":[{"from":"r1","to":"r2 或已有藏品名称","label":"产于|用于|属于菜系|代表菜|搭配|起源|生产|供应|相关"}],
+ "notes":"整理说明：拆分思路、略去的内容、需要用户核实的地方"
+}`;
+const parseJsonLoose = t => {
+  const s = String(t).replace(/^```(?:json)?\s*|\s*```$/g, "");
+  const a = s.indexOf("{"), b = s.lastIndexOf("}");
+  return JSON.parse(s.slice(a, b + 1));
+};
+app.post("/api/ai/organize", { bodyLimit: 2 * 1024 * 1024 }, async req => {
+  const opts = {};
+  let file = null;
+  if (req.isMultipart()) {
+    for await (const part of req.parts()) {
+      if (part.type === "file") file = { buffer: await part.toBuffer(), filename: part.filename };
+      else opts[part.fieldname] = part.value;
+    }
+  } else Object.assign(opts, req.body || {});
+  const doc = await extract({ ...(file || {}), url: opts.url, text: opts.text });
+  const provider = await ai.resolveProvider(opts.provider);
+  const canSee = provider === "claude";
+  const existing = (await q("SELECT name, alt FROM items ORDER BY name")).rows.map(r => r.alt ? `${r.name}（${r.alt}）` : r.name).join("、");
+  const prompt = `资料来源：${doc.source}${doc.truncated ? "（过长，已截断）" : ""}
+${opts.hint ? `整理要求：${opts.hint}\n` : ""}${canSee && doc.images.length ? `附带 ${doc.images.length} 份原件/图片，请一并阅读（正文中的 [图片N] 对应第 N 张）。\n` : ""}
+已有藏品（避免重复；同一事物请在 existing 标注）：${existing}
+
+按以下 JSON 结构输出：
+${ORGANIZE_SCHEMA}
+
+=== 资料正文 ===
+${doc.text}`;
+  const t0 = Date.now();
+  const r = await ai.complete({ provider, system: ORGANIZE_SYS, prompt, maxTokens: 16000, timeoutMs: 300e3,
+    attachments: canSee ? doc.images : [] });
+  let data;
+  try { data = parseJsonLoose(r.text); }
+  catch { throw Object.assign(new Error("AI 返回的内容无法解析，请重试或缩短资料"), { statusCode: 502, expose: true }); }
+  return { source: doc.source, chars: doc.chars, truncated: doc.truncated, images: doc.images.length, imagesUsed: canSee ? doc.images.length : 0,
+    provider: r.provider, model: r.model, ms: Date.now() - t0,
+    items: Array.isArray(data.items) ? data.items : [], relations: Array.isArray(data.relations) ? data.relations : [], notes: data.notes || "" };
+});
+
+/* ---------- 版本号与 Service Worker（离线缓存） ---------- */
+// 版本 = 前端文件内容的哈希；文件变化即视为新版本
+const SHELL = ["index.html", "app.js", "share.js", "styles.css", "manifest.webmanifest", "sw.js"];
+let verCache = { at: 0, v: "" };
+async function appVersion() {
+  if (Date.now() - verCache.at < 5000) return verCache.v;
+  const h = crypto.createHash("sha1");
+  for (const f of SHELL) h.update(await fsp.readFile(path.join(PUBLIC_DIR, f)).catch(() => ""));
+  verCache = { at: Date.now(), v: h.digest("hex").slice(0, 12) };
+  return verCache.v;
+}
+app.get("/api/version", async (req, reply) => { reply.header("cache-control", "no-store"); return { version: await appVersion() }; });
+app.get("/sw.js", async (req, reply) => {
+  const src = await fsp.readFile(path.join(PUBLIC_DIR, "sw.js"), "utf8");
+  reply.header("cache-control", "no-cache").type("text/javascript; charset=utf-8");
+  return src.replace("__VERSION__", await appVersion());
 });
 
 /* ---------- 启动 ---------- */

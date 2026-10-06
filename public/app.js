@@ -22,12 +22,23 @@ const tc = t => `--tc:var(--t-${t})`;
 /* ---------- API ---------- */
 let db = { items: [] }, me = null, aiOn = false;
 const isAdmin = () => me?.role === "admin";
-async function api(path, { method="GET", body, raw } = {}){
+const offlineErr = (msg = "网络不可用（离线）") => Object.assign(new Error(msg), { offline: true });
+let cacheRefreshT;
+async function api(path, { method="GET", body, raw, timeout } = {}){
   const opt = { method, headers:{} };
   if (body instanceof FormData) opt.body = body;
   else if (body !== undefined){ opt.headers["content-type"] = "application/json"; opt.body = raw ? body : JSON.stringify(body); }
-  const r = await fetch(path, opt);
+  // 手机明确离线时写操作不再白等；信号很弱时请求可能一直挂着，用超时兜底并视为离线
+  if (method !== "GET" && !navigator.onLine) throw offlineErr();
+  const ms = timeout ?? (body instanceof FormData ? 180e3 : path.startsWith("/api/ai") || path === "/api/import" ? 330e3 : 15e3);
+  opt.signal = AbortSignal.timeout(ms);
+  let r;
+  try { r = await fetch(path, opt); }
+  catch (e) { throw offlineErr(e.name === "TimeoutError" ? "网络太慢，请求超时（已按离线处理）" : undefined); }
   const j = await r.json().catch(() => ({}));
+  if (r.status === 503 && j.offline) throw offlineErr(j.error);
+  // 写操作成功后，后台刷新一次离线缓存里的藏品列表
+  if (r.ok && method !== "GET" && navigator.serviceWorker?.controller){ clearTimeout(cacheRefreshT); cacheRefreshT = setTimeout(() => fetch("/api/items").catch(() => {}), 1500); }
   if (r.status === 401 && path !== "/api/login"){ me = null; loginView(); }
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
@@ -48,6 +59,7 @@ const mediaSrc = m => m.url || mediaUrl(m.file);
 // small=true：用缩略图（卡片、编辑器），视频显示封面帧、悬停时播放
 function mediaEl(m, cls="", small=false){
   if (!m) return "";
+  if (m.local){ const u = esc(localUrls.get(m.id) || ""); return m.kind==="video" ? `<video class="${cls}" src="${u}" muted playsinline controls></video>` : `<img class="${cls}" src="${u}" alt="">`; }
   const dim = m.w && m.h ? ` width="${m.w}" height="${m.h}"` : "";
   const thumb = m.thumb && mediaUrl(m.thumb);
   if (m.kind==="video"){
@@ -145,7 +157,8 @@ function route(){
   document.querySelectorAll("#tabbar [data-r]").forEach(a => a.classList.toggle("on", a.dataset.r===r || (!tabbed && a.dataset.r==="more")));
   $("#moreSheet").hidden = true;
   G.current = { r, params, id: parts[1] && decodeURIComponent(parts[1]) };
-  ({home, discover, atlas, stories, graph, taste, ai, item, map: mapView, compare}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
+  clearAppClick();
+  ({home, discover, atlas, stories, graph, taste, ai, item, map: mapView, compare, catalog, dupes}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
   updateCmpBar();
   $("#shareBtn").hidden = r==="ai";
   if (r!=="graph") window.scrollTo(0,0);
@@ -249,7 +262,7 @@ function item(_, id){
   app.innerHTML = `
   <div class="detail">
     <div>
-      <div style="display:flex;gap:10px;align-items:center">${chip(it.type)}<span class="eyebrow">${esc(it.region)}</span></div>
+      <div style="display:flex;gap:10px;align-items:center">${chip(it.type)}<span class="eyebrow">${esc(it.region)}</span>${it._pending?`<span class="chip" style="color:var(--gold);border-color:var(--gold)">待同步</span>`:""}</div>
       <h1>${esc(it.name)}</h1>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
       ${cover(it) && !(it.body||"").includes("m:"+cover(it).id) ? `<figure class="lead">${mediaEl(cover(it))}${cover(it).caption?`<figcaption>${esc(cover(it).caption)}</figcaption>`:""}</figure>` : ""}
       <p class="prose" style="font-size:18px;margin-top:18px">${esc(it.summary)}</p>
@@ -282,7 +295,7 @@ function item(_, id){
       ${healthPanel(it.health)}
       ${hasFlavor(it.flavor)?`<div class="panel"><h4>风味轮廓</h4><div style="text-align:center">${radar(it.flavor)}</div></div>`:""}
       <div class="panel"><h4>档案</h4><dl class="kv">
-        <dt>类别</dt><dd>${TYPES[it.type]?.zh}</dd><dt>地区</dt><dd>${esc(it.region)||"—"}</dd>
+        <dt>类别</dt><dd>${TYPES[it.type]?.zh}</dd>${it.country?`<dt>国家</dt><dd><a href="#/catalog?by=region" style="color:var(--accent)">${esc(countryName(it.country))}</a></dd>`:""}<dt>地区</dt><dd>${esc(it.region)||"—"}</dd>
         <dt>入藏</dt><dd>${(it.created||"").slice(0,10)}</dd></dl>
         <div class="tags" style="margin-top:10px">${(it.tags||[]).map(t=>`<a class="tag" href="#/discover?tag=${encodeURIComponent(t)}">#${esc(t)}</a>`).join("")}</div></div>
       <div class="panel"><h4>知识连接 · ${nb.length}</h4>
@@ -296,7 +309,9 @@ function item(_, id){
     </aside>
   </div>`;
   const refresh = x => { upsert(x); route(); };
-  const patch = body => isAdmin() && api("/api/items/"+encodeURIComponent(it.id), {method:"PATCH", body}).then(refresh, fail);
+  const offlineSave = async op => { await queueOp(op); applyPending(); route(); toast("已离线保存，联网后自动同步"); };
+  const patch = body => isAdmin() && api("/api/items/"+encodeURIComponent(it.id), {method:"PATCH", body}).then(refresh,
+    e => isOffline(e) ? offlineSave({type:"patch", id:it.id, body}) : fail(e));
   $("#stSeg").onclick = e => { const b=e.target.closest("button"); if(b) patch({status:b.dataset.s}); };
   $("#rate").onclick = e => { const r=+e.target.dataset.r; if(!r) return; const rating = it.rating===r?0:r; patch(rating ? {rating, status:"tried"} : {rating}); };
   const jFill = (j = {}) => { $("#jid").value = j.id || ""; $("#jd").value = j.date || new Date().toISOString().slice(0,10); $("#jp").value = j.place || "";
@@ -309,13 +324,16 @@ function item(_, id){
     if (!body.text && body.price === "") return toast("请填写笔记或价格");
     if (body.price !== ""){ cfg.lastCurrency = body.currency; saveCfg(); }
     const id = $("#jid").value;
-    api(id ? `/api/journal/${id}` : `/api/items/${encodeURIComponent(it.id)}/journal`, {method: id ? "PUT" : "POST", body}).then(refresh, fail); };
+    api(id ? `/api/journal/${id}` : `/api/items/${encodeURIComponent(it.id)}/journal`, {method: id ? "PUT" : "POST", body}).then(refresh,
+      e => isOffline(e) ? offlineSave({type:"journal", id:it.id, body:{...body, id: id || undefined}}) : fail(e)); };
   $("#cmpBtn").onclick = () => { if (toggleCompare(it.id)) $("#cmpBtn").textContent = inCmp(it.id) ? "✓ 已在对比中" : "⚖ 加入对比"; };
   initItemMap(it);
   app.querySelectorAll("[data-delj]").forEach(b => b.onclick = () => { if(confirm("删除这条日志？"))
     api("/api/journal/"+b.dataset.delj, {method:"DELETE"}).then(() => api("/api/items/"+encodeURIComponent(it.id))).then(refresh, fail); });
   $("#edit").onclick = () => editor(it);
   $("#del").onclick = () => { if (confirm(`从博物馆中移除「${it.name}」？`)) api("/api/items/"+encodeURIComponent(it.id), {method:"DELETE"}).then(() => {
+    // 同时清掉本机离线缓存里的这件藏品的图片
+    window.caches?.open("media-v1").then(c => (it.media||[]).forEach(m => [m.file, m.thumb].filter(Boolean).forEach(f => c.delete(mediaUrl(f))))).catch(() => {});
     db.items = db.items.filter(x=>x!==it); db.items.forEach(x => x.relations = (x.relations||[]).filter(r=>r.to!==it.id)); go("#/discover"); toast("已移除"); }, fail); };
   if ($("#askAi"))   $("#askAi").onclick = () => aiStory(it);
 }
@@ -358,6 +376,7 @@ function editor(it, preset={}, focus=""){
       <label>名称 *<input name="name" required value="${esc(d.name)}" placeholder="如：金华火腿" enterkeyhint="next"></label>
       <label>原名 / 外文名<input name="alt" value="${esc(d.alt)}" lang="en" autocapitalize="words"></label>
       <label>地区<input name="region" value="${esc(d.region)}" placeholder="国家 · 地区" list="regionlist"></label>
+      <label>国家<select name="country" data-auto="${d.country ? "" : "1"}">${countryOptions(d.country || inferCountry(d.region))}</select></label>
       <datalist id="regionlist">${regions.map(r=>`<option value="${esc(r)}">`).join("")}</datalist>
       <label>一句话简介<textarea name="summary" rows="2">${esc(d.summary)}</textarea></label>`)}
     ${sec("位置", !!d.geo || focus==="geo" || ["restaurant","region","producer"].includes(d.type), geoSection(d), "餐馆、产区等可标注坐标")}
@@ -397,6 +416,10 @@ function editor(it, preset={}, focus=""){
   const modal = $("#modal"); modal.dataset.lock = "1"; modal.dataset.dirty = "";
   const form = $("#ef"), body = form.elements.body;
   const getGeo = bindGeo(form, () => { modal.dataset.dirty = "1"; saveDraft(); });
+  // 地区文字变化时，若国家未手动选过，自动推断
+  form.elements.region.addEventListener("input", () => { const sel = form.elements.country;
+    if (sel.dataset.auto){ const c = inferCountry(form.elements.region.value); if (c) sel.value = c; } });
+  form.elements.country.addEventListener("change", e => e.target.dataset.auto = "");
   if (focus === "geo") setTimeout(() => $("#geoQ").closest("details").scrollIntoView({block:"start"}), 100);
   if (isNew && !d.name) setTimeout(() => form.elements.name.focus(), 50);
 
@@ -405,7 +428,7 @@ function editor(it, preset={}, focus=""){
     const f = new FormData(form);
     const levels = {}; form.querySelectorAll(".lvl").forEach(l => { const on = l.querySelector(".on"); if (on) levels[l.dataset.l] = +on.dataset.n; });
     return { ...d, type: form.querySelector(".typechips .on")?.dataset.type || d.type,
-      name:(f.get("name")||"").trim(), alt:f.get("alt").trim(), region:f.get("region").trim(), summary:f.get("summary").trim(),
+      name:(f.get("name")||"").trim(), alt:f.get("alt").trim(), region:f.get("region").trim(), country:f.get("country") || "", summary:f.get("summary").trim(),
       body:f.get("body"), story:f.get("story").trim(), source:f.get("source").trim(),
       tags: chipValues(form.querySelector('[data-name="tags"]')),
       flavor: Object.fromEntries([...form.querySelectorAll(".dots")].map(x => [x.dataset.f, x.querySelectorAll(".on").length])),
@@ -456,7 +479,14 @@ function editor(it, preset={}, focus=""){
       if (f.size > 300*1024*1024 && !confirm(`${f.name} 有 ${(f.size/1048576).toFixed(0)}MB，仍要保存吗？`)) continue;
       $("#upProg").textContent = `上传中 ${n+1}/${files.length}：${f.name}（${(f.size/1048576).toFixed(1)}MB）…`;
       const fd = new FormData(); fd.append("file", f);
-      try { d.media.push(await api("/api/media", {method:"POST", body:fd})); markDirty(); drawMedia(); saveDraft(); } catch(e){ toast("上传失败：" + e.message); }
+      try { d.media.push(await api("/api/media", {method:"POST", body:fd})); markDirty(); drawMedia(); saveDraft(); }
+      catch(e){
+        if (!isOffline(e)) { toast("上传失败：" + e.message); continue; }
+        const id = "local-" + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+        await OB.putFile(id, f); localUrls.set(id, URL.createObjectURL(f));
+        d.media.push({ id, kind: kindOf(f.type), name: f.name, local: true }); markDirty(); drawMedia();
+        toast("离线：照片已暂存在本机，联网后自动上传");
+      }
     }
     $("#upProg").textContent = "";
   };
@@ -488,12 +518,23 @@ function editor(it, preset={}, focus=""){
   $("#esave").onclick = async e => {
     const out = collect();
     if (!out.name) { toast("请填写名称"); form.elements.name.closest("details").open = true; form.elements.name.focus(); return; }
+    if (isNew){
+      const sim = db.items.map(x => ({ x, s: similarity({ ...out, id: "new" }, x) })).filter(o => o.s.score >= 0.8).sort((a,b) => b.s.score - a.s.score)[0];
+      if (sim && !confirm(`已有相似藏品「${sim.x.name}」（${sim.s.why}）。\n仍要新建一件吗？`)) return;
+    }
     e.target.disabled = true;
+    const finish = (id, msg) => { clearTimeout(draftT); if (isNew) localStorage.removeItem(DRAFT); closeModal(); toast(msg); go("#/item/"+encodeURIComponent(id)); route(); };
     try {
+      if (String(d.id||"").startsWith("tmp-")) throw Object.assign(new Error("待同步"), { offline: true });   // 尚未同步的离线新建：继续走队列
+      await uploadLocalMedia(out);
       const saved = upsert(await api(isNew ? "/api/items" : "/api/items/"+encodeURIComponent(d.id), {method: isNew?"POST":"PUT", body:out}));
-      clearTimeout(draftT); if (isNew) localStorage.removeItem(DRAFT);
-      closeModal(); toast(isNew?"已入藏":"已更新"); go("#/item/"+encodeURIComponent(saved.id)); route();
-    } catch(err){ fail(err); e.target.disabled = false; }
+      finish(saved.id, isNew ? "已入藏" : "已更新");
+    } catch(err){
+      if (!isOffline(err)) { fail(err); e.target.disabled = false; return; }
+      if (isNew){ const tmpId = "tmp-" + Date.now().toString(36); await queueOp({ type:"create", tmpId, body:out }); }
+      else await queueOp({ type:"update", id:d.id, body:out });
+      applyPending(); finish(isNew ? pendingOps.at(-1).tmpId : d.id, "已离线保存，联网后自动同步");
+    }
   };
 }
 function openModal(){ $("#modal").hidden = false; }
@@ -663,6 +704,7 @@ async function ai(){
   app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>AI 探索 · Discovery</h2>
     <div style="display:flex;gap:8px;align-items:center"><span id="aiProv"></span><button class="sm" id="aiSet">⚙ 设置</button></div></div>
   <div id="aiEmpty"></div>
+  ${organizePanel()}
   <div class="taste">
     <div class="panel"><h4>✦ AI 编目员</h4><p class="muted" style="font-size:13px">输入一个名字，AI 起草一份词条，你审阅修改后入藏。</p>
       <div class="filters"><input id="catQ" placeholder="如：鲱鱼罐头 / 普洱生茶 / Vin Santo"><button class="primary" id="catGo">起草</button></div>
@@ -672,6 +714,7 @@ async function ai(){
       <div id="disOut" class="ai-suggest"></div></div>
   </div>`;
   $("#aiSet").onclick = aiSettingsOpen;
+  bindOrganize();
   const busy = (el, on) => { el.disabled = on; el.dataset.t ||= el.textContent; el.textContent = on ? "思考中…" : el.dataset.t; };
   loadAiCfg().then(c => {
     const av = c.available;
@@ -958,6 +1001,421 @@ function bindCmp(){
   app.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { toggleCompare(b.dataset.rm); route(); });
 }
 
+/* ---------- 国家（ISO 两位代码）与推断 ---------- */
+// [中文名, 推断用的别名（含常见地区/城市）]
+const COUNTRIES = {
+  CN:["中国",["中国","中國","china","福建","福州","浙江","衢州","金华","广东","四川","云南","北京","上海","江苏","湖南","山东"]],
+  TW:["台湾",["台湾","臺灣","taiwan"]], HK:["香港",["香港","hong kong"]], MO:["澳门",["澳门","澳門","macau"]],
+  JP:["日本",["日本","japan","东京","京都","大阪","北海道"]], KR:["韩国",["韩国","韓國","korea"]],
+  TH:["泰国",["泰国","thailand","曼谷"]], VN:["越南",["越南","vietnam"]], ID:["印尼",["印尼","印度尼西亚","indonesia","苏门答腊","巴厘"]],
+  MY:["马来西亚",["马来西亚","malaysia","槟城"]], SG:["新加坡",["新加坡","singapore"]], PH:["菲律宾",["菲律宾","philippines"]],
+  IN:["印度",["印度","india"]], TR:["土耳其",["土耳其","turkey","türkiye","伊斯坦布尔"]], IR:["伊朗",["伊朗","iran"]],
+  LB:["黎巴嫩",["黎巴嫩","lebanon"]], IL:["以色列",["以色列","israel"]], GE:["格鲁吉亚",["格鲁吉亚","georgia"]],
+  FR:["法国",["法国","france","巴黎","paris","汝拉","jura","波尔多","勃艮第","香槟","普罗旺斯","多尔多涅","dordogne","新阿基坦","阿尔萨斯","诺曼底","布列塔尼"]],
+  IT:["意大利",["意大利","italy","italia","阿马尔菲","皮埃蒙特","托斯卡纳","西西里","伦巴第","威尼托","撒丁"]],
+  ES:["西班牙",["西班牙","spain","españa","赫雷斯","安达卢西亚","加泰罗尼亚","巴斯克","德埃萨"]], PT:["葡萄牙",["葡萄牙","portugal","波尔图"]],
+  DE:["德国",["德国","germany"]], AT:["奥地利",["奥地利","austria"]], CH:["瑞士",["瑞士","switzerland"]], BE:["比利时",["比利时","belgium"]],
+  NL:["荷兰",["荷兰","netherlands","holland"]], GB:["英国",["英国","united kingdom","苏格兰","英格兰","威尔士","伦敦"]], IE:["爱尔兰",["爱尔兰","ireland"]],
+  DK:["丹麦",["丹麦","denmark"]], SE:["瑞典",["瑞典","sweden"]], NO:["挪威",["挪威","norway","norge","罗弗敦","lofoten","特罗姆瑟","tromsø","塞尼亚","senja"]],
+  FI:["芬兰",["芬兰","finland"]], IS:["冰岛",["冰岛","iceland"]], RU:["俄罗斯",["俄罗斯","russia"]], PL:["波兰",["波兰","poland"]],
+  HU:["匈牙利",["匈牙利","hungary"]], CZ:["捷克",["捷克","czech"]], GR:["希腊",["希腊","greece"]], HR:["克罗地亚",["克罗地亚","croatia"]],
+  US:["美国",["美国","usa","united states","加州","纽约"]], CA:["加拿大",["加拿大","canada"]], MX:["墨西哥",["墨西哥","mexico"]],
+  PE:["秘鲁",["秘鲁","peru"]], BR:["巴西",["巴西","brazil"]], AR:["阿根廷",["阿根廷","argentina"]], CL:["智利",["智利","chile"]],
+  MA:["摩洛哥",["摩洛哥","morocco"]], EG:["埃及",["埃及","egypt"]], ET:["埃塞俄比亚",["埃塞俄比亚","ethiopia"]], ZA:["南非",["南非","south africa"]],
+  AU:["澳大利亚",["澳大利亚","australia"]], NZ:["新西兰",["新西兰","new zealand"]],
+  XX:["多国 / 跨地区",["全球","多国","斯堪的纳维亚","scandinavia","地中海","古罗马"]],
+};
+const countryName = c => COUNTRIES[c]?.[0] || "";
+// 从「国家 · 地区」等文字推断国家：按词从左到右，命中第一个即返回
+function inferCountry(...texts){
+  for (const t of texts) {
+    for (const token of String(t||"").toLowerCase().split(/[·・\/,，、|()（）]+/)) {
+      const w = token.trim(); if (!w) continue;
+      for (const [code, [, aliases]] of Object.entries(COUNTRIES)) if (aliases.some(a => w.includes(a.toLowerCase()))) return code;
+    }
+  }
+  return "";
+}
+// 二级地区：取「国家 · 地区 细分」中地区的第一个词，如「罗弗敦 Reine」「罗弗敦 Svolvær」都归入「罗弗敦」
+const subRegion = it => ((it.region||"").split(/[·・]/)[1] || "").trim().split(/\s+|\s*\/\s*/)[0];
+const countryOptions = sel => `<option value="">— 未指定 —</option>` + Object.entries(COUNTRIES)
+  .sort((a,b) => a[0]==="XX" ? 1 : b[0]==="XX" ? -1 : a[1][0].localeCompare(b[1][0], "zh-Hans-u-co-pinyin"))
+  .map(([c,[n]]) => `<option value="${c}" ${c===sel?"selected":""}>${n}</option>`).join("");
+
+/* ---------- 拼音首字母（借助浏览器的拼音排序规则，无需字典） ---------- */
+const PY_COLLATOR = new Intl.Collator("zh-Hans-u-co-pinyin");
+const PY_BOUND = "阿八嚓哒妸发旮哈讥咔垃痳拏噢妑七呥扨它穵夕丫帀".split(""), PY_LETTER = "ABCDEFGHJKLMNOPQRSTWXYZ".split("");
+function initialOf(s){
+  const ch = [...String(s||"").trim()][0] || "";
+  const latin = ch.normalize("NFD").replace(/[̀-ͯ]/g, "");
+  if (/[a-z]/i.test(latin)) return latin.toUpperCase();
+  if (/[0-9]/.test(ch) || !/[㐀-鿿]/.test(ch)) return "#";
+  let i = PY_BOUND.length - 1;
+  while (i > 0 && PY_COLLATOR.compare(ch, PY_BOUND[i]) < 0) i--;
+  return PY_LETTER[i];
+}
+
+/* ---------- 馆藏目录 ---------- */
+function catalog(params){
+  const st = { by: params.get("by") || cfg.catBy || "region", q: params.get("q") || "", tag: params.get("tag") || "", status: "" };
+  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>馆藏目录 · Index</h2><span class="muted" id="ctCount"></span></div>
+    <div class="filters"><input id="ctQ" placeholder="在目录中查找：名称、原名、地区、标签…" value="${esc(st.q)}" type="search">
+      <div class="seg" id="ctSt">${[["","全部"],["tried","已品尝"],["want","想尝"]].map(([k,v])=>`<button class="sm ${k===st.status?"on":""}" data-s="${k}">${v}</button>`).join("")}</div></div>
+    <div class="seg ct-tabs" id="ctBy">${[["region","地区"],["az","A–Z"],["type","类别"],["time","时间"]].map(([k,v])=>`<button class="${k===st.by?"on":""}" data-by="${k}">${v}</button>`).join("")}</div>
+    <div id="ctTags" class="tags ct-tagline"></div>
+    <div id="ctTools"></div>
+    <div class="ct-wrap"><div id="ctBody"></div><div class="az-rail" id="azRail"></div></div>`;
+  const allTags = [...new Set(db.items.flatMap(i => i.tags||[]))].sort((a,b) => PY_COLLATOR.compare(a,b));
+  const row = it => {
+    const tasted = (it.journal||[]).map(j => j.date).sort().at(-1);
+    return `<a class="ct-row" href="#/item/${encodeURIComponent(it.id)}" style="${tc(it.type)}"><span class="dot"></span>
+      <span class="ct-name">${esc(it.name)}${it.alt?` <i>${esc(it.alt)}</i>`:""}</span>
+      <span class="ct-meta">${st.by!=="type"?`<em>${TYPES[it.type].zh}</em>`:""}${st.by!=="region"&&it.region?`<em>${esc(it.region.split(/[·・]/)[0].trim())}</em>`:""}${st.by==="time"&&tasted?`<em>尝于 ${tasted}</em>`:""}</span>
+      <span class="ct-st">${it.rating?`<span class="stars">${"★".repeat(it.rating)}</span>`:it.status==="tried"?"●":it.status==="want"?"○":""}</span></a>`;
+  };
+  const group = (key, title, list, open, extra="") => `<details class="ct-group" ${open?"open":""} id="g-${esc(key)}"><summary><span>${title}</span><b>${list.length}</b></summary>${extra}${list.map(row).join("")}</details>`;
+  const byPinyin = (a,b) => PY_COLLATOR.compare(a.name, b.name);
+  const draw = () => {
+    const q = st.q.trim().toLowerCase();
+    const list = db.items.filter(i => (!st.status || i.status===st.status) && (!st.tag || (i.tags||[]).includes(st.tag)) &&
+      (!q || [i.name, i.alt, i.region, countryName(i.country), (i.tags||[]).join(" "), i.summary].join(" ").toLowerCase().includes(q)));
+    $("#ctCount").textContent = `${list.length} / ${db.items.length} 件`;
+    $("#ctTags").innerHTML = allTags.map(t => `<span class="tag" data-tag="${esc(t)}" style="${t===st.tag?"background:var(--accent);color:#fff":""}">#${esc(t)}</span>`).join("");
+    const expand = !!q || !!st.tag || list.length <= 40;
+    let html = "", letters = [];
+    $("#ctTools").innerHTML = "";
+    if (st.by === "region"){
+      const by = new Map();
+      for (const it of list) { const c = it.country || "";
+        if (!by.has(c)) by.set(c, new Map());
+        const sub = subRegion(it) || "（未细分）"; const m = by.get(c); m.set(sub, [...(m.get(sub)||[]), it]); }
+      const keys = [...by.keys()].sort((a,b) => (!a) - (!b) || (a==="XX") - (b==="XX") || PY_COLLATOR.compare(countryName(a), countryName(b)));
+      html = keys.map(c => {
+        const subs = [...by.get(c).entries()].sort((a,b) => (a[0]==="（未细分）") - (b[0]==="（未细分）") || PY_COLLATOR.compare(a[0], b[0]));
+        const n = subs.reduce((s,[,l]) => s + l.length, 0);
+        const inner = subs.length === 1 ? subs[0][1].sort(byPinyin).map(row).join("")
+          : subs.map(([s,l]) => `<div class="ct-sub">${esc(s)} <span>${l.length}</span></div>${l.sort(byPinyin).map(row).join("")}`).join("");
+        const title = c ? esc(countryName(c) || c) : "未标国家";
+        const fix = !c && isAdmin() ? `<div class="ct-fix"><button class="sm" id="ctInfer">按地区文字自动推断国家</button><span class="muted">或在藏品编辑页手动选择</span></div>` : "";
+        return `<details class="ct-group" ${expand || keys.length <= 6 ? "open" : ""} id="g-${c||"none"}"><summary><span>${title}</span><b>${n}</b></summary>${fix}${inner}</details>`;
+      }).join("");
+    } else if (st.by === "az"){
+      const by = {};
+      for (const it of list) (by[initialOf(it.name)] ||= []).push(it);
+      letters = Object.keys(by).sort((a,b) => (a==="#") - (b==="#") || a.localeCompare(b));
+      html = letters.map(L => `<div class="az-sec" id="az-${L}"><div class="az-h">${L}</div>${by[L].sort(byPinyin).map(row).join("")}</div>`).join("");
+    } else if (st.by === "type"){
+      html = Object.entries(TYPES).map(([k,v]) => { const l = list.filter(i => i.type===k).sort(byPinyin);
+        return l.length ? group(k, `<span class="dot" style="${tc(k)};display:inline-block;margin-right:8px"></span>${v.zh}`, l, expand) : ""; }).join("");
+    } else {
+      const by = new Map();
+      for (const it of [...list].sort((a,b) => (b.created||"").localeCompare(a.created||""))) { const m = (it.created||"").slice(0,7); by.set(m, [...(by.get(m)||[]), it]); }
+      html = [...by.entries()].map(([m,l], i) => group(m, `${m.slice(0,4)} 年 ${+m.slice(5)} 月入藏`, l, expand || i < 3)).join("");
+    }
+    $("#ctBody").innerHTML = html || `<div class="empty">没有符合条件的藏品。</div>`;
+    const ALL = [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ", "#"];
+    $("#azRail").hidden = st.by !== "az";
+    $("#azRail").innerHTML = ALL.map(L => `<button data-az="${L}" ${letters.includes(L)?"":"disabled"}>${L}</button>`).join("");
+    $("#ctInfer") && ($("#ctInfer").onclick = inferAll);
+  };
+  const inferAll = async () => {
+    const todo = db.items.filter(i => !i.country).map(i => ({ it: i, c: inferCountry(i.region) })).filter(x => x.c);   // 只看地区文字：外文名里的「俄罗斯鲟」等是物种名，不是产地
+    const left = db.items.filter(i => !i.country).length - todo.length;
+    if (!todo.length) return toast("没有能从地区文字推断出国家的藏品，请在编辑页手动选择");
+    const sample = todo.slice(0, 12).map(x => `· ${x.it.name}（${x.it.region||"—"}）→ ${countryName(x.c)}`).join("\n");
+    if (!confirm(`将为 ${todo.length} 件藏品设置国家：\n\n${sample}${todo.length > 12 ? `\n…等 ${todo.length} 件` : ""}\n\n${left ? `另有 ${left} 件无法推断，保持未标。\n` : ""}继续？`)) return;
+    let ok = 0;
+    for (const { it, c } of todo) { try { upsert(await api("/api/items/"+encodeURIComponent(it.id), {method:"PUT", body:{...it, country:c}})); ok++; } catch(e){ if (e.offline) break; } }
+    toast(`已设置 ${ok} 件`); draw();
+  };
+  $("#ctQ").oninput = e => { st.q = e.target.value; draw(); };
+  $("#ctSt").onclick = e => { const b = e.target.closest("button"); if (!b) return; st.status = b.dataset.s; $("#ctSt").querySelectorAll("button").forEach(x => x.classList.toggle("on", x===b)); draw(); };
+  $("#ctBy").onclick = e => { const b = e.target.closest("button"); if (!b) return; st.by = cfg.catBy = b.dataset.by; saveCfg(); $("#ctBy").querySelectorAll("button").forEach(x => x.classList.toggle("on", x===b)); draw(); };
+  $("#ctTags").onclick = e => { const t = e.target.dataset.tag; if (t == null) return; st.tag = st.tag===t ? "" : t; draw(); };
+  $("#azRail").onclick = e => { const L = e.target.dataset.az; if (L) document.getElementById("az-"+L)?.scrollIntoView({ behavior:"smooth", block:"start" }); };
+  draw();
+}
+
+/* ---------- 重复检测 ---------- */
+const normName = s => String(s||"").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[\s·・\-–—_'’"“”.,，。、()（）\[\]【】/]+/g, "");
+const bigrams = s => { const a = new Set(); for (let i = 0; i < s.length - 1; i++) a.add(s.slice(i, i+2)); return a; };
+const dice = (a, b) => { if (a.length < 2 || b.length < 2) return a === b ? 1 : 0; const A = bigrams(a), B = bigrams(b); let n = 0; for (const x of A) if (B.has(x)) n++; return 2*n / (A.size + B.size); };
+// 名称键：名称本身 + 外文名的各段；isName 标记是否来自名称
+const nameKeys = it => {
+  const out = [{ k: normName(it.name), isName: true }];
+  for (const p of String(it.alt||"").split(/[·・\/]/)) { const k = normName(p); if (k.length >= 2 && !out.some(o => o.k === k)) out.push({ k, isName: false }); }
+  return out.filter(o => o.k.length >= 2);
+};
+// 两件藏品的相似度：0 表示不相似；>0 时返回 {score, why}
+// 至少一方必须是名称本身参与比较：外文名常写地点或描述（如「Tromsø」「Italian caviar」），两个外文名相同不算重复
+function similarity(a, b){
+  const ka = nameKeys(a), kb = nameKeys(b);
+  let best = { score: 0, why: "" };
+  for (const x of ka) for (const y of kb) {
+    if (!x.isName && !y.isName) continue;
+    if (x.k === y.k) return { score: 1, why: x.isName && y.isName ? "名称相同" : "名称与外文名相同" };
+    if (a.type !== b.type) continue;
+    const d = dice(x.k, y.k);
+    if (d >= 0.8 && d > best.score) best = { score: d, why: "名称非常接近" };
+    const [s, l] = x.k.length <= y.k.length ? [x.k, y.k] : [y.k, x.k];
+    if (s.length >= 3 && l.includes(s) && s.length / l.length >= 0.6 && 0.8 > best.score) best = { score: 0.8, why: "名称包含" };
+  }
+  return best;
+}
+const pairKey = (a, b) => [a, b].sort().join("|");
+let dupIgnore = null;
+async function loadDupIgnore(){ if (dupIgnore) return dupIgnore; try { dupIgnore = new Set(await api("/api/prefs/dupIgnore") || []); } catch { dupIgnore = new Set(); } return dupIgnore; }
+function findDuplicates(ignore = new Set()){
+  const out = [], items = db.items.filter(i => !String(i.id).startsWith("tmp-"));
+  for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+    const s = similarity(items[i], items[j]);
+    if (s.score && !ignore.has(pairKey(items[i].id, items[j].id))) out.push({ a: items[i], b: items[j], ...s });
+  }
+  return out.sort((x, y) => y.score - x.score);
+}
+async function dupes(){
+  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>疑似重复 · Duplicates</h2><span class="muted">检查中…</span></div>`;
+  const ign = await loadDupIgnore();
+  const list = findDuplicates(ign);
+  const card = it => `<div class="dup-side" style="${tc(it.type)}">${chip(it.type)}
+      <a class="dup-name" href="#/item/${encodeURIComponent(it.id)}">${esc(it.name)}</a>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
+      <div class="muted dup-meta">${esc(it.region||"—")}${it.country?` · ${countryName(it.country)}`:""}</div>
+      <p>${esc((it.summary||"").slice(0,90))}</p>
+      <div class="muted dup-meta">日志 ${(it.journal||[]).length} · 媒体 ${(it.media||[]).length} · 关系 ${(it.relations||[]).length} · 入藏 ${(it.created||"").slice(0,10)}</div></div>`;
+  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>疑似重复 · Duplicates</h2><span class="muted">${list.length} 组</span></div>
+    <p class="muted" style="font-size:13px">按名称与原名的相似度找出可能重复的藏品。合并会把另一件的日志、图片、关系、标签与缺失的字段并入保留的一件，然后删除另一件。</p>
+    ${list.length ? list.map((p,i) => `<div class="dup" data-i="${i}">
+      <div class="dup-why">${esc(p.why)} · 相似度 ${Math.round(p.score*100)}%</div>
+      <div class="dup-pair">${card(p.a)}${card(p.b)}</div>
+      ${isAdmin()?`<div class="dup-act"><button class="sm" data-keep="a">保留左边，合并右边</button><button class="sm" data-keep="b">保留右边，合并左边</button><button class="sm ghost" data-not>不是重复</button></div>`:""}
+    </div>`).join("") : `<div class="empty">没有发现疑似重复。</div>`}`;
+  app.onclick = async e => {
+    const box = e.target.closest(".dup"); if (!box || !e.target.closest("button")) return;
+    const p = list[+box.dataset.i];
+    if (e.target.dataset.not != null){
+      ign.add(pairKey(p.a.id, p.b.id));
+      try { await api("/api/prefs/dupIgnore", {method:"PUT", body:[...ign]}); box.remove(); toast("已标记为不是重复"); } catch(err){ fail(err); }
+      return;
+    }
+    const [keep, from] = e.target.dataset.keep === "a" ? [p.a, p.b] : [p.b, p.a];
+    if (!confirm(`把「${from.name}」合并进「${keep.name}」？\n「${from.name}」的日志、图片、关系、标签会转到「${keep.name}」，然后被删除。此操作不能撤销。`)) return;
+    try {
+      upsert(await api(`/api/items/${encodeURIComponent(keep.id)}/merge`, {method:"POST", body:{from: from.id}}));
+      await reload(); toast(`已合并到「${keep.name}」`); route();
+    } catch(err){ fail(err); }
+  };
+}
+// 路由切换时清掉 dupes 页挂在 #app 上的点击处理
+const clearAppClick = () => { app.onclick = null; };
+
+/* ---------- AI 整理文档 ---------- */
+function organizePanel(){
+  return `<div class="panel org"><h4>✦ 整理文档</h4>
+    <p class="muted" style="font-size:13px">上传 Word / PDF、填写网址或粘贴文字，AI 会拆成藏品与关系的清单，你逐条审核后再入藏。用 Claude 时，文档里的图片与表格截图也会被读取。</p>
+    <div class="seg" id="orgSrc"><button class="sm on" data-src="file">上传文件</button><button class="sm" data-src="url">网址</button><button class="sm" data-src="text">粘贴文字</button></div>
+    <div class="org-in" data-p="file"><label class="upload">＋ 选择文件（.docx / .pdf / .txt / .md）<input type="file" id="orgFile" accept=".docx,.pdf,.txt,.md,.markdown,.html,.htm" hidden></label> <span id="orgFileName" class="muted"></span></div>
+    <div class="org-in" data-p="url" hidden><input id="orgUrl" placeholder="https://…" inputmode="url"></div>
+    <div class="org-in" data-p="text" hidden><textarea id="orgText" rows="6" placeholder="粘贴研究笔记、菜单、文章…"></textarea></div>
+    <div class="filters" style="margin-top:8px"><input id="orgHint" placeholder="可选：整理要求，如「只整理餐馆」「每种鱼子酱单独成条」"><button class="primary" id="orgGo">开始整理</button></div>
+    <div id="orgOut"></div></div>`;
+}
+function bindOrganize(){
+  let src = "file", file = null;
+  $("#orgSrc").onclick = e => { const b = e.target.closest("button"); if (!b) return; src = b.dataset.src;
+    $("#orgSrc").querySelectorAll("button").forEach(x => x.classList.toggle("on", x===b));
+    document.querySelectorAll(".org-in").forEach(p => p.hidden = p.dataset.p !== src); };
+  $("#orgFile").onchange = e => { file = e.target.files[0] || null; $("#orgFileName").textContent = file ? `${file.name}（${(file.size/1024).toFixed(0)} KB）` : ""; };
+  $("#orgGo").onclick = async e => {
+    const fd = new FormData();
+    if (src === "file"){ if (!file) return toast("请先选择文件"); fd.append("file", file); }
+    if (src === "url"){ const u = $("#orgUrl").value.trim(); if (!u) return toast("请填写网址"); fd.append("url", u); }
+    if (src === "text"){ const t = $("#orgText").value.trim(); if (!t) return toast("请粘贴文字"); fd.append("text", t); }
+    if ($("#orgHint").value.trim()) fd.append("hint", $("#orgHint").value.trim());
+    if (cfg.aiProvider) fd.append("provider", cfg.aiProvider);
+    const btn = e.target, t0 = Date.now(); btn.disabled = true;
+    const tick = setInterval(() => btn.textContent = `整理中… ${Math.round((Date.now()-t0)/1000)} 秒`, 1000);
+    $("#orgOut").innerHTML = `<p class="muted">正在读取文档并请 AI 整理，长文档可能需要 1–3 分钟。</p>`;
+    try { renderOrganized(await api("/api/ai/organize", {method:"POST", body:fd})); }
+    catch(err){ $("#orgOut").innerHTML = `<p style="color:#b33">${esc(err.message)}</p>`; }
+    clearInterval(tick); btn.disabled = false; btn.textContent = "开始整理";
+  };
+}
+function renderOrganized(r){
+  const items = r.items.map((it, i) => {
+    const probe = { ...it, id: "probe" + i, type: TYPES[it.type] ? it.type : "dish" };
+    const dup = it.existing && byName(it.existing) || db.items.map(x => ({ x, s: similarity(probe, x) })).filter(o => o.s.score >= 0.8).sort((a,b) => b.s.score - a.s.score)[0]?.x;
+    return { ...it, type: probe.type, ref: it.ref || "r" + (i+1), dup, pick: !dup };
+  });
+  const out = $("#orgOut");
+  const draw = () => {
+    out.innerHTML = `<div class="org-sum">来源：${esc(r.source)} · ${r.chars} 字${r.truncated?"（已截断）":""}${r.images?` · 图片/原件 ${r.imagesUsed}/${r.images} 份已读取`:""} · ${esc(r.provider)} ${esc(r.model)} · ${Math.round(r.ms/1000)} 秒</div>
+      ${r.images && !r.imagesUsed ? `<p class="muted" style="font-size:13px">当前使用的 AI 不能读取图片，文档中的图片与截图内容未被整理；如需要，请切换到 Claude 再整理。</p>` : ""}
+      ${r.notes?`<div class="story-box" style="margin:10px 0">${esc(r.notes)}</div>`:""}
+      <div class="org-bar"><label class="chk"><input type="checkbox" id="orgAll" ${items.every(i=>i.pick)?"checked":""}> 全选</label>
+        <span class="muted">${items.length} 件 · ${r.relations.length} 条关系</span><button class="primary sm" id="orgImport">导入选中 ${items.filter(i=>i.pick).length} 件</button></div>
+      ${items.map((it, i) => `<div class="org-item${it.pick?"":" off"}" data-i="${i}" style="${tc(it.type)}">
+        <input type="checkbox" data-f="pick" ${it.pick?"checked":""}>
+        <div class="org-main">
+          <div class="org-line"><select data-f="type">${Object.entries(TYPES).map(([k,v]) => `<option value="${k}" ${k===it.type?"selected":""}>${v.zh}</option>`).join("")}</select>
+            <input data-f="name" value="${esc(it.name)}"><input data-f="alt" value="${esc(it.alt||"")}" placeholder="原名"></div>
+          <div class="muted org-meta">${esc(it.region||"")}${it.country?` · ${countryName(String(it.country).toUpperCase())||it.country}`:""}${(it.tags||[]).length?` · #${(it.tags||[]).map(esc).join(" #")}`:""}</div>
+          <div class="org-sumtext">${esc(it.summary||"")}</div>
+          ${it.dup?`<div class="org-dup">⚠ 可能与已有藏品重复：<a href="#/item/${encodeURIComponent(it.dup.id)}" target="_blank">${esc(it.dup.name)}</a>（默认不导入；导入后可在「疑似重复」中合并）</div>`:""}
+          <details><summary class="muted">正文与轶事</summary><div class="prose" style="font-size:14px">${renderBody(it.body||"")}${it.story?`<div class="story-box">${esc(it.story)}</div>`:""}</div></details>
+        </div></div>`).join("")}`;
+  };
+  draw();
+  out.oninput = out.onchange = e => {
+    if (e.target.id === "orgAll"){ items.forEach(i => i.pick = e.target.checked); draw(); return; }
+    const box = e.target.closest(".org-item"); if (!box) return;
+    const it = items[+box.dataset.i], f = e.target.dataset.f;
+    if (f === "pick"){ it.pick = e.target.checked; draw(); } else if (f) it[f] = e.target.value;
+  };
+  out.onclick = async e => {
+    if (e.target.id !== "orgImport") return;
+    const chosen = items.filter(i => i.pick && i.name?.trim());
+    if (!chosen.length) return toast("没有选中的条目");
+    const stamp = Date.now().toString(36);
+    const idOf = Object.fromEntries(chosen.map((it, i) => [it.ref, `ai-${stamp}-${i}`]));
+    const resolve = to => idOf[to] || byName(String(to||""))?.id;
+    const payload = chosen.map(it => ({ ...it, id: idOf[it.ref], country: String(it.country||"").toUpperCase(),
+      source: `AI 整理：${r.source}`, status: "", rating: 0, media: [], journal: [],
+      relations: r.relations.filter(x => x.from === it.ref && resolve(x.to)).map(x => ({ to: resolve(x.to), label: x.label || "相关" })) }));
+    e.target.disabled = true;
+    try {
+      const res = await api("/api/import", {method:"POST", body:{ items: payload }});
+      await reload(); toast(`已导入 ${res.items} 件，可在「馆藏目录」查看`); go("#/catalog?by=time");
+    } catch(err){ fail(err); e.target.disabled = false; }
+  };
+}
+
+/* ---------- 离线：本地队列（IndexedDB）与同步 ---------- */
+const OB = (() => {
+  let dbp;
+  const open = () => dbp ||= new Promise((res, rej) => { const r = indexedDB.open("gastronomique-offline", 1);
+    r.onupgradeneeded = () => { r.result.createObjectStore("ops", { keyPath: "key", autoIncrement: true }); r.result.createObjectStore("files"); };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  const run = async (store, mode, fn) => { const d = await open(); return new Promise((res, rej) => { const t = d.transaction(store, mode); const q = fn(t.objectStore(store)); t.oncomplete = () => res(q?.result); t.onerror = () => rej(t.error); }); };
+  return {
+    add: op => run("ops", "readwrite", s => s.add(op)), put: op => run("ops", "readwrite", s => s.put(op)),
+    all: () => run("ops", "readonly", s => s.getAll()), del: k => run("ops", "readwrite", s => s.delete(k)),
+    putFile: (k, b) => run("files", "readwrite", s => s.put(b, k)), getFile: k => run("files", "readonly", s => s.get(k)),
+    delFile: k => run("files", "readwrite", s => s.delete(k)),
+  };
+})();
+const localUrls = new Map();     // 离线时添加的照片：本地 blob 预览地址
+let pendingOps = [], syncing = false;
+const isOffline = e => e && e.offline;
+async function queueOp(op){ await OB.add({ ...op, at: Date.now() }); await refreshPending(); }
+async function refreshPending(){
+  try { pendingOps = await OB.all(); } catch { pendingOps = []; }
+  for (const op of pendingOps) for (const m of op.body?.media || []) if (m.local && !localUrls.has(m.id)) {
+    const b = await OB.getFile(m.id).catch(() => null); if (b) localUrls.set(m.id, URL.createObjectURL(b)); }
+  updateNetPill();
+}
+// 把尚未同步的改动叠加到本地数据上，离线时也能看到自己刚录的内容
+function applyPending(){
+  for (const op of pendingOps) {
+    const it = byId(op.id);
+    if (op.type === "create" && !byId(op.tmpId)) db.items.unshift({ ...op.body, id: op.tmpId, created: new Date(op.at).toISOString(), updated: new Date(op.at).toISOString(), journal: [], _pending: true });
+    if (op.type === "update" && it) Object.assign(it, op.body, { _pending: true });
+    if (op.type === "patch" && it) Object.assign(it, op.body, { _pending: true });
+    if (op.type === "journal" && it) { it.journal = [...(it.journal||[]).filter(j => j.id !== op.body.id), { ...op.body, id: op.body.id || "tmp-j" + op.key }]; it._pending = true; }
+  }
+}
+function updateNetPill(){
+  let p = $("#netPill");
+  if (!p){ p = document.createElement("button"); p.id = "netPill"; p.className = "net-pill"; p.onclick = () => navigator.onLine ? syncOutbox(true) : toast("当前离线，联网后会自动同步");
+    $(".top-actions").prepend(p); }
+  const n = pendingOps.length, err = pendingOps.some(o => o.error);
+  p.hidden = navigator.onLine && !n;
+  p.className = "net-pill" + (!navigator.onLine ? " off" : err ? " err" : "");
+  p.textContent = !navigator.onLine ? (n ? `离线 · 待同步 ${n}` : "离线") : syncing ? "同步中…" : `${err ? "⚠ " : ""}待同步 ${n}`;
+  p.title = err ? pendingOps.find(o => o.error).error : "";
+}
+// 把藏品里暂存在本机的照片上传到服务器，并替换为正式的媒体记录（联网保存与离线同步共用）
+async function uploadLocalMedia(body){
+  if (!body?.media) return body;
+  const out = [];
+  for (const m of body.media) {
+    if (!m.local) { out.push(m); continue; }
+    const blob = await OB.getFile(m.id); if (!blob) continue;
+    const fd = new FormData(); fd.append("file", new File([blob], m.name || "photo", { type: blob.type }));
+    const up = await api("/api/media", { method: "POST", body: fd });
+    if (body.body) body.body = body.body.replaceAll(`![[m:${m.id}]]`, `![[m:${up.id}]]`);
+    out.push({ ...up, caption: m.caption || "" });
+    await OB.delFile(m.id); localUrls.delete(m.id);
+  }
+  body.media = out;
+  return body;
+}
+async function syncOutbox(manual){
+  if (syncing || !navigator.onLine) return;
+  await refreshPending(); if (!pendingOps.length) return;
+  syncing = true; updateNetPill();
+  const idMap = {};
+  let done = 0, stopped = "";
+  for (const op of pendingOps) {
+    try {
+      const realId = id => idMap[id] || id;
+      const body = op.body ? structuredClone(op.body) : undefined;
+      if (body) await uploadLocalMedia(body);
+      if (body?.relations) body.relations = body.relations.map(r => ({ ...r, to: realId(r.to) })).filter(r => !String(r.to).startsWith("tmp-"));
+      if (op.type === "create"){ const s = await api("/api/items", { method: "POST", body }); idMap[op.tmpId] = s.id; }
+      if (op.type === "update") await api("/api/items/" + encodeURIComponent(realId(op.id)), { method: "PUT", body });
+      if (op.type === "patch") await api("/api/items/" + encodeURIComponent(realId(op.id)), { method: "PATCH", body });
+      if (op.type === "journal") await api(body.id && !String(body.id).startsWith("tmp-") ? `/api/journal/${body.id}` : `/api/items/${encodeURIComponent(realId(op.id))}/journal`,
+        { method: body.id && !String(body.id).startsWith("tmp-") ? "PUT" : "POST", body: { ...body, id: undefined } });
+      // 后续操作若引用了刚创建的临时 id，换成真实 id
+      for (const later of pendingOps) if (later !== op && later.id && idMap[later.id]) later.id = idMap[later.id];
+      await OB.del(op.key); done++;
+    } catch(e){
+      if (isOffline(e)) { stopped = "离线"; break; }
+      op.error = e.message; await OB.put(op); stopped = e.message; break;
+    }
+  }
+  syncing = false;
+  await refreshPending();
+  if (done){ await reload(); applyPending(); route(); }
+  if (done || manual) toast(stopped ? `已同步 ${done} 项；未完成：${stopped}` : `已同步 ${done} 项离线改动`);
+  const cur = G.current; if (cur?.r === "item" && idMap[cur.id]) go("#/item/" + encodeURIComponent(idMap[cur.id]));
+}
+window.addEventListener("online", () => { updateNetPill(); syncOutbox(); });
+window.addEventListener("offline", updateNetPill);
+
+/* ---------- 版本更新提示 ---------- */
+let swReg = null, appVer = "";
+function showUpdate(){
+  if ($("#updBar")) return;
+  const b = document.createElement("div"); b.id = "updBar"; b.className = "upd-bar";
+  b.innerHTML = `<span>✦ 有新版本可用</span><button class="primary sm">刷新</button><button class="ghost sm" aria-label="稍后">×</button>`;
+  b.querySelector(".primary").onclick = () => {
+    if (pendingOps.length && !navigator.onLine && !confirm("还有离线改动未同步（不会丢失，刷新后继续保留）。现在刷新？")) return;
+    if (swReg?.waiting) swReg.waiting.postMessage("SKIP_WAITING"); else location.reload();
+  };
+  b.querySelector(".ghost").onclick = () => b.remove();
+  document.body.appendChild(b);
+}
+async function initUpdates(){
+  try { appVer = (await fetch("/api/version", { cache: "no-store" }).then(r => r.json())).version || ""; } catch {}
+  if ("serviceWorker" in navigator && window.isSecureContext){
+    try {
+      swReg = await navigator.serviceWorker.register("/sw.js");
+      if (swReg.waiting && navigator.serviceWorker.controller) showUpdate();
+      swReg.addEventListener("updatefound", () => { const w = swReg.installing;
+        w?.addEventListener("statechange", () => { if (w.state === "installed" && navigator.serviceWorker.controller) showUpdate(); }); });
+      let reloading = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => { if (!reloading){ reloading = true; location.reload(); } });
+      const check = () => swReg.update().catch(() => {});
+      setInterval(check, 30 * 60e3); document.addEventListener("visibilitychange", () => !document.hidden && check());
+      return;
+    } catch {}
+  }
+  // 不支持 Service Worker（如局域网 http 访问）：定期比对版本号
+  const check = async () => { try { const v = (await fetch("/api/version", { cache: "no-store" }).then(r => r.json())).version; if (v && appVer && v !== appVer) showUpdate(); } catch {} };
+  setInterval(check, 10 * 60e3); document.addEventListener("visibilitychange", () => !document.hidden && check());
+}
+
 /* ---------- command palette ---------- */
 let sel = 0, results = [];
 function openPalette(){ $("#palette").hidden=false; $("#paletteInput").value=""; renderPalette(); $("#paletteInput").focus(); }
@@ -1007,17 +1465,23 @@ $("#menuBtn").onclick = () => {
   if ($(".menu")) return $(".menu").remove();
   const m = document.createElement("div"); m.className="menu";
   m.innerHTML = `<div class="muted" style="font-size:12px;padding:4px 14px">${esc(me?.name)} · ${isAdmin()?"馆长":"访客"}</div>
-    ${isAdmin()?`<button data-a="invite">✉ 邀请朋友</button><button data-a="ai">✦ AI 设置</button><button data-a="export">⇩ 导出 JSON</button><button data-a="import">⇧ 导入 JSON / 旧版备份</button>`:""}
-    <button data-a="theme">◐ 切换明暗</button><button data-a="logout">⎋ 退出登录</button>`;
+    ${isAdmin()?`<button data-a="invite">✉ 邀请朋友</button><button data-a="ai">✦ AI 设置</button><button data-a="dupes">⧉ 疑似重复</button><button data-a="export">⇩ 导出 JSON</button><button data-a="import">⇧ 导入 JSON / 旧版备份</button>`:""}
+    <button data-a="theme">◐ 切换明暗</button><button data-a="logout">⎋ 退出登录</button>
+    <div class="muted" style="font-size:11px;padding:6px 14px 2px">版本 ${esc(appVer || "—")}${"serviceWorker" in navigator && window.isSecureContext ? " · 支持离线" : " · 离线需 HTTPS"}</div>`;
   document.body.appendChild(m);
   m.onclick = e => {
     const a = e.target.dataset.a; if (!a) return; m.remove();
     if (a==="export") location.href = "/api/export";
     if (a==="import") $("#importFile").click();
     if (a==="invite") inviteView();
+    if (a==="dupes") go("#/dupes");
     if (a==="ai") aiSettingsOpen();
     if (a==="theme"){ const dark = matchMedia("(prefers-color-scheme: dark)").matches; const cur = cfg.theme || (dark?"dark":"light"); cfg.theme = cur==="dark"?"light":"dark"; document.documentElement.dataset.theme=cfg.theme; saveCfg(); route(); }
-    if (a==="logout") api("/api/logout", {method:"POST"}).finally(() => location.reload());
+    if (a==="logout"){
+      if (pendingOps.length && !confirm(`还有 ${pendingOps.length} 项离线改动未同步，退出后仍会保留在本机。继续退出？`)) return;
+      navigator.serviceWorker?.controller?.postMessage("CLEAR_PRIVATE");
+      api("/api/logout", {method:"POST"}).finally(() => location.reload());
+    }
   };
 };
 async function inviteView(){
@@ -1060,15 +1524,21 @@ function loginView(){
     try { await api("/api/login", {method:"POST", body:{name:f.get("name"), password:f.get("password")}}); boot(); }
     catch(err){ $("#lerr").textContent = err.message; } };
 }
+let updatesInit = false;
 async function boot(){
+  if (!updatesInit){ updatesInit = true; initUpdates(); }
   try {
     const r = await api("/api/me"); me = r.user; aiOn = r.ai;
     if (!me) return loginView();
     document.body.classList.remove("locked");
     document.body.classList.toggle("ro", !isAdmin());
     document.querySelectorAll('[data-r="ai"]').forEach(a => a.hidden = !isAdmin());
-    await reload(); route();
-  } catch(e){ app.innerHTML = `<div class="empty">无法连接服务器：${esc(e.message)}</div>`; }
+    await refreshPending();
+    if (navigator.onLine && pendingOps.length) await syncOutbox();
+    await reload(); applyPending(); route();
+  } catch(e){ app.innerHTML = e.offline
+      ? `<div class="empty">当前离线，本机还没有缓存的数据。<br><span style="font-size:15px">请先联网打开一次，之后就可以离线浏览和录入。</span></div>`
+      : `<div class="empty">无法连接服务器：${esc(e.message)}</div>`; }
 }
 window.removeEventListener("hashchange", route);
 window.addEventListener("hashchange", () => me && route());
