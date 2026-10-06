@@ -180,35 +180,6 @@ async function drawStories(list){
   footer();
 }
 
-async function drawTaste(){
-  const p = G.profile();
-  frame(); header("TASTE PROFILE");
-  font(72, CN, 700); C.fillStyle = T.ink; C.fillText("我的品味档案", 84, 230);
-  font(26, CN); C.fillStyle = T.muted; C.fillText(`基于 ${p.tried.length} 件已品尝的藏品`, 84, 280);
-  const R = Math.max(130, Math.min(280, (H - 860) / 2.6)), cy = 330 + R * 1.3;
-  radar(p.fl, W/2, cy, R);
-  const fk = Object.entries(p.fl).sort((a,b) => b[1]-a[1]);
-  let y = cy + R * 1.3 + 50;
-  if (fk[0]?.[1]){
-    font(34, CN); C.fillStyle = T.ink; C.textAlign = "center";
-    C.fillText(`偏爱「${G.FLAVORS[fk[0][0]]}」与「${G.FLAVORS[fk[1][0]]}」`, W/2, y); C.textAlign = "left"; y += 80;
-  }
-  const colW = (W - 168 - 40) / 2;
-  const bars = (title, arr, x) => {
-    let yy = y; font(22, SANS, 600); C.fillStyle = T.muted; spaced(title, x, yy, 4); yy += 44;
-    const mx = arr[0]?.[1] || 1;
-    const step = Math.min(64, Math.max(46, (H - 200 - yy) / 6));
-    for (const [k,v] of arr.slice(0, 6)){
-      if (yy > H - 190) break;
-      font(28, CN); C.fillStyle = T.ink; text(k, x, yy, 170, 30, 1);
-      C.fillStyle = T.accent; rr(x+185, yy-16, (colW-195) * v/mx, 14, 7); C.fill(); yy += step;
-    }
-  };
-  bars("心之所向 · 地区", p.regions, 84);
-  bars("最爱的藏品", p.top.slice(0,5).map(i => [i.name, i.rating || 1]), 84 + colW + 40);
-  footer();
-}
-
 async function drawGraph(){
   frame(); header("KNOWLEDGE GRAPH");
   font(72, CN, 700); C.fillStyle = T.ink; C.fillText("我的食物知识网络", 84, 230);
@@ -266,7 +237,6 @@ function plan(){
   const { r, id, params } = G.current || {};
   if (r === "item"){ const it = G.byId(id); return it && { kind:"item", name: it.name, items:[it], run: () => drawItem(it), item:true }; }
   if (r === "compare"){ const list = G.cmpList().map(G.byId); return list.length >= 2 && { kind:"compare", name:"对比品鉴", items:list, run: () => drawCompare(list) }; }
-  if (r === "taste") return { kind:"taste", name: "品味档案", items: G.profile().top, run: drawTaste };
   if (r === "graph") return { kind:"graph", name: "知识网络", items: G.items, run: drawGraph };
   if (r === "stories"){ const list = G.items.filter(i => i.type==="story" || i.story); return { kind:"stories", name: "奇闻轶事", items: list, run: () => drawStories(list) }; }
   if (r === "atlas"){ const tab = params?.get("tab") || "tried"; const label = {tried:"我品尝过的", want:"我想尝的", journal:"最近的品尝日志"}[tab];
@@ -347,16 +317,6 @@ function storiesText(items, fmt){
   if (fmt === "weibo") return `【食物冷知识】${body[0] ? body[0].t + "：" + body[0].s : ""} ${hashtags(items, fmt)}`;
   return body.map(b => `${b.t}\n${b.s}`).join("\n\n");
 }
-function tasteText(fmt){
-  const p = G.profile(), fk = Object.entries(p.fl).sort((a,b) => b[1]-a[1]);
-  const fav = fk[0]?.[1] ? `${G.FLAVORS[fk[0][0]]}、${G.FLAVORS[fk[1][0]]}` : "";
-  const regions = p.regions.slice(0,5).map(x => x[0]).join("、"), top = p.top.slice(0,5).map(i => i.name).join("、");
-  const lv = Object.entries(p.levels||{}).map(([k,v]) => `${G.LEVELS[k]}${G.LEVEL_TXT[Math.round(v)]}`).join("、");
-  if (fmt === "md") return `# 我的品味档案\n\n基于 ${p.tried.length} 件已品尝的藏品。\n\n- **偏爱风味**：${fav || "—"}\n- **心之所向**：${regions || "—"}\n- **最爱**：${top || "—"}\n${lv ? `- **饮食倾向**：${lv}\n` : ""}`;
-  if (fmt === "xhs") return `👅 我的品味档案\n\n尝过 ${p.tried.length} 件之后，发现自己——\n💛 偏爱：${fav || "还在探索"}\n📍 常去：${regions || "—"}\n🏆 最爱：${top || "—"}${lv ? `\n⚖️ 饮食倾向：${lv}` : ""}\n\n${hashtags(p.tried, fmt)}`;
-  if (fmt === "weibo") return `我的品味档案：偏爱${fav || "（探索中）"}，最爱 ${top}。${hashtags(p.tried, fmt)}`;
-  return `我的品味档案\n偏爱风味：${fav}\n常去地区：${regions}\n最爱：${top}${lv ? "\n饮食倾向：" + lv : ""}`;
-}
 function graphText(fmt){
   const E = G.edges(), deg = {};
   E.forEach(e => { deg[e.s] = (deg[e.s]||0)+1; deg[e.t] = (deg[e.t]||0)+1; });
@@ -387,7 +347,6 @@ function makeText(fmt){
   const c = current;
   if (c.kind === "compare") return compareText(c.items, fmt);
   if (c.kind === "item") return itemText(c.items[0], fmt);
-  if (c.kind === "taste") return tasteText(fmt);
   if (c.kind === "graph") return graphText(fmt);
   if (c.kind === "stories") return storiesText(c.items, fmt);
   if (c.kind === "journal") return journalText(fmt);

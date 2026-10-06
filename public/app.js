@@ -193,7 +193,7 @@ function route(){
   $("#moreSheet").hidden = true;
   G.current = { r, params, id: parts[1] && decodeURIComponent(parts[1]) };
   clearAppClick();
-  ({home, discover, atlas, stories, graph, taste, ai, item, map: mapView, compare, catalog, dupes}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
+  ({home, discover, atlas, stories, graph, ai, item, map: mapView, compare, catalog, dupes}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
   updateCmpBar();
   $("#shareBtn").hidden = r==="ai";
   if (r!=="graph") window.scrollTo(0,0);
@@ -830,7 +830,7 @@ function graph(params){
   graphStop = () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
 }
 
-/* ---------- taste profile ---------- */
+/* ---------- 品味统计（供 AI 推荐使用） ---------- */
 function profile(){
   const tried = db.items.filter(i=>i.status==="tried");
   const fl = {}; let w = 0;
@@ -843,26 +843,6 @@ function profile(){
   return { tried, fl, levels, ingredients:count(i=>i.health?.ingredients||[]), regions:count(i=>i.region?[i.region.split("·")[0].trim()]:[]), tags:count(i=>i.tags||[]), types:count(i=>[TYPES[i.type].zh]),
     top: [...tried].sort((a,b)=>(b.rating||0)-(a.rating||0)).slice(0,8) };
 }
-function taste(){
-  const p = profile();
-  const bars = (arr) => { const mx = arr[0]?.[1]||1; return arr.slice(0,8).map(([k,v])=>`<div class="bar"><span>${esc(k)}</span><i style="width:${v/mx*100}%"></i></div>`).join("") || `<p class="muted">暂无数据</p>`; };
-  const fk = Object.entries(p.fl).sort((a,b)=>b[1]-a[1]);
-  const persona = fk[0]?.[1] ? `你偏爱 <b>${FLAVORS[fk[0][0]]}</b> 与 <b>${FLAVORS[fk[1][0]]}</b>，对 <b>${FLAVORS[fk.at(-1)[0]]}</b> 着墨最少。` : "给已品尝的藏品打分并填写风味，品味画像会逐渐浮现。";
-  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>品味档案 · Taste Profile</h2><span class="muted">基于 ${p.tried.length} 件已品尝藏品，按评分加权</span></div>
-  <div class="taste">
-    <div class="panel"><h4>风味指纹</h4><div style="text-align:center">${radar(p.fl,300)}</div><p class="prose" style="text-align:center;font-size:15px">${persona}</p></div>
-    <div class="side">
-      <div class="panel"><h4>心之所向 · 地区</h4>${bars(p.regions)}</div>
-      <div class="panel"><h4>常见标签</h4>${bars(p.tags)}</div>
-      <div class="panel"><h4>类别</h4>${bars(p.types)}</div>
-      ${Object.keys(p.levels).length || p.ingredients.length ? `<div class="panel"><h4>饮食倾向</h4>
-        ${Object.entries(p.levels).map(([k,v])=>`<div class="bar"><span>${LEVELS[k]}</span><i style="width:${v/3*100}%;background:var(--gold)"></i><small class="muted">${LEVEL_TXT[Math.round(v)]}</small></div>`).join("")}
-        ${p.ingredients.length?`<div class="eyebrow" style="margin-top:10px">常吃的配料</div><div class="tags">${p.ingredients.slice(0,12).map(([k])=>`<span class="tag">${esc(k)}</span>`).join("")}</div>`:""}</div>` : ""}
-    </div>
-  </div>
-  <div class="section-h"><h2>我的殿堂级藏品</h2><a href="#/ai" style="color:var(--accent)">✦ 让 AI 基于品味推荐 →</a></div>${grid(p.top)}`;
-}
-
 /* ---------- AI：经服务器调用 Claude 或 DeepSeek（密钥只在服务器） ---------- */
 let aiCfg = null;
 const loadAiCfg = async () => (aiCfg = await api("/api/ai/config"));
@@ -931,7 +911,7 @@ async function ai(){
     <div class="panel"><h4>✦ AI 编目员</h4><p class="muted" style="font-size:13px">输入一个名字，AI 起草一份词条，你审阅修改后入藏。</p>
       <div class="filters"><input id="catQ" placeholder="如：鲱鱼罐头 / 普洱生茶 / Vin Santo"><button class="primary" id="catGo">起草</button></div>
       <div id="catOut"></div></div>
-    <div class="panel"><h4>✦ 基于品味的发现</h4><p class="muted" style="font-size:13px">根据你的品味档案与已有收藏，推荐你可能会着迷、但还没有收录的食物。</p>
+    <div class="panel"><h4>✦ 基于品味的发现</h4><p class="muted" style="font-size:13px">根据你已品尝藏品的评分、风味与已有收藏，推荐你可能会着迷、但还没有收录的食物。</p>
       <div class="filters"><input id="disQ" placeholder="可选：方向，如「发酵」「巴尔干」「冬天」"><button class="primary" id="disGo">发现</button></div>
       <div id="disOut" class="ai-suggest"></div></div>
   </div>`;
