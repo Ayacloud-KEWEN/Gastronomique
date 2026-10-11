@@ -579,3 +579,9 @@ a.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .md-row.hit{padding-left:4px}
 .collection ul{margin:0;padding:0}
 .df-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;position:sticky;top:64px;z-index:5;background:var(--bg);padding:8px 0}
+.order-tg{flex:none;align-self:center;font-size:12px;padding:3px 10px}
+.order-tg.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.md-terms{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.term-chip{display:inline-block;font-size:11px;padding:0 7px;border:1px solid var(--gold);color:var(--gold);border-radius:999px;font-style:italic;text-decoration:none;line-height:18px}
+.term-chip.known{background:color-mix(in srgb,var(--gold) 14%,transparent)}
+.ms-arch{margin:0 0 10px}

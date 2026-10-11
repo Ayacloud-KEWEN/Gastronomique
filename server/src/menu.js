@@ -28,9 +28,11 @@ const READ_SYS = `你是一位精通各国菜单的美食翻译。阅读用户�
 - 原文菜名照抄（保留重音符号）；中文名要地道、简洁，常见菜用通行译名。
 - note 用一两句中文说明这道菜是什么、主要食材和做法，菜单上的配菜、酱汁也写进去；遇到厨房术语顺带解释。
 - 看不清的字不要编造，宁可留空；同一道菜只列一次；饮品与酒也要列出（type 用 beverage）。
+- 另把菜单里出现的厨房术语、做法与状态用语单独列在 terms（如 à la plancha、confit、meunière、al dente、tataki），不要把普通食材名当术语。
 - 只输出 JSON，不要任何解释或代码块标记。`;
 const READ_SCHEMA = `{"restaurant":"菜单上能看到的餐厅名，看不到留空","language":"菜单语言，如 法语",
- "dishes":[{"orig":"原文菜名","zh":"中文名","note":"说明","price":"价格原样，如 18 €，没有留空","section":"所在分区，如 前菜","type":"dish|beverage|ingredient","ingredients":["主要食材（中文）"],"tags":["如 法国菜、海鲜"]}]}`;
+ "dishes":[{"orig":"原文菜名","zh":"中文名","note":"说明","price":"价格原样，如 18 €，没有留空","section":"所在分区，如 前菜","type":"dish|beverage|ingredient","ingredients":["主要食材（中文）"],"tags":["如 法国菜、海鲜"]}],
+ "terms":[{"term":"术语原文","lang":"语言，如 法语","zh":"中文译名","explain":"一两句解释：是什么做法或状态","example":"菜单上用到它的一道菜原文"}]}`;
 
 async function readMenu(images, provider, hint) {
   const r = await ai.complete({ provider, system: READ_SYS, attachments: images, maxTokens: 8000, timeoutMs: 240e3,
@@ -41,7 +43,11 @@ async function readMenu(images, provider, hint) {
     orig: str(x.orig, 200), name: str(x.zh, 200) || str(x.orig, 200), note: str(x.note, 600), price: str(x.price, 40),
     section: str(x.section, 40), type: TYPES.includes(x.type) ? x.type : "dish", ingredients: list(x.ingredients), tags: list(x.tags, 8, 30),
   })).filter(x => x.name).slice(0, 120);
-  return { restaurant: str(d.restaurant, 200), language: str(d.language, 40), dishes, model: r.model, provider: r.provider };
+  const seen = new Set();
+  const terms = (Array.isArray(d.terms) ? d.terms : []).map(x => ({
+    term: str(x.term, 100), lang: str(x.lang, 20), name: str(x.zh, 100), note: str(x.explain, 400), example: str(x.example, 200),
+  })).filter(x => x.term && !seen.has(norm(x.term)) && seen.add(norm(x.term))).slice(0, 40);
+  return { restaurant: str(d.restaurant, 200), language: str(d.language, 40), dishes, terms, model: r.model, provider: r.provider };
 }
 
 /* ---------- 2. 与馆藏比对 ---------- */
@@ -108,6 +114,22 @@ ${todo.map(i => `${i} | ${dishes[i].orig} | ${dishes[i].name} | ${dishes[i].note
   return { results: out.map(o => ({ same: o.same && brief(o.same), by: o.by || "", related: o.related.map(brief).filter(Boolean) })), warning: out.warning || "" };
 }
 
+/* ---------- 术语：与「菜单术语」藏品比对，并标出每道菜用到的术语 ---------- */
+export const TERM_TAG = "菜单术语";
+export async function matchTerms(terms, dishes) {
+  const known = (await q("SELECT id, name, alt FROM items WHERE $1 = ANY(tags)", [TERM_TAG])).rows
+    .map(x => ({ ...x, keys: [x.name, ...altParts(x.alt)].map(norm).filter(k => k.length >= 3) }));
+  const find = t => known.find(k => k.keys.includes(norm(t)));
+  const out = terms.map(t => { const k = find(t.term); return { ...t, known: k ? { id: k.id, name: k.name } : null }; });
+  // 菜名原文里出现的术语（本次识别的 + 已收录的），用于在结果页标出
+  const all = [...out.map(t => ({ key: norm(t.term), term: t.term, id: t.known?.id || "" })),
+               ...known.flatMap(k => k.keys.map(key => ({ key, term: k.alt.split(/\s*[·/|]\s*/)[0] || k.name, id: k.id })))];
+  const perDish = dishes.map(d => { const o = norm(d.orig); const hit = new Map();
+    for (const a of all) if (a.key.length >= 3 && o.includes(a.key) && !hit.has(a.key)) hit.set(a.key, { term: a.term, id: a.id });
+    return [...hit.values()]; });
+  return { terms: out, perDish };
+}
+
 export async function scanMenu({ images = [], provider, hint = "" } = {}) {
   images = (Array.isArray(images) ? images : []).filter(x => /^image\/(jpeg|png|webp|gif)$/.test(x?.mime) && typeof x.data === "string").slice(0, 8)
     .map(x => ({ kind: "image", mime: x.mime, data: x.data }));
@@ -118,13 +140,14 @@ export async function scanMenu({ images = [], provider, hint = "" } = {}) {
   const t0 = Date.now();
   const menu = await readMenu(images, p, str(hint, 300));
   const m = await matchMenu(menu.dishes, p);
-  return { ...menu, dishes: menu.dishes.map((d, i) => ({ ...d, ...m.results[i] })), warning: m.warning, ms: Date.now() - t0 };
+  const t = await matchTerms(menu.terms, menu.dishes);
+  return { ...menu, terms: t.terms, dishes: menu.dishes.map((d, i) => ({ ...d, ...m.results[i], terms: t.perDish[i] })), warning: m.warning, ms: Date.now() - t0 };
 }
 
 /* ---------- 3. 草稿箱 ---------- */
 const shapeDraft = r => ({ id: String(r.id), name: r.name, orig: r.orig, note: r.note, price: r.price, section: r.section, type: r.type,
   tags: r.tags, ingredients: r.ingredients, related: r.related, restaurantId: r.restaurant_id || "", restaurantName: r.restaurant_name,
-  date: r.scanned_on.toISOString().slice(0, 10), created: r.created_at.toISOString() });
+  ordered: r.ordered, date: r.scanned_on.toISOString().slice(0, 10), created: r.created_at.toISOString() });
 
 export async function listDrafts() {
   return (await q("SELECT * FROM drafts ORDER BY created_at DESC, id")).rows.map(shapeDraft);
@@ -141,10 +164,10 @@ export async function addDrafts({ dishes = [], restaurantId = "", restaurantName
     const name = str(d.name, 200); if (!name) continue;
     const orig = str(d.orig, 200);
     if (have.some(h => sameRest(h) && (norm(h.name) === norm(name) || (orig && norm(h.orig) === norm(orig))))) { skipped++; continue; }
-    await q(`INSERT INTO drafts(name,orig,note,price,section,type,tags,ingredients,related,restaurant_id,restaurant_name)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    await q(`INSERT INTO drafts(name,orig,note,price,section,type,tags,ingredients,related,restaurant_id,restaurant_name,ordered)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [name, orig, str(d.note, 600), str(d.price, 40), str(d.section, 40), TYPES.includes(d.type) ? d.type : "dish",
-       list(d.tags, 8, 30), list(d.ingredients), list(d.related, 5, 100), rid, rname]);
+       list(d.tags, 8, 30), list(d.ingredients), list(d.related, 5, 100), rid, rname, !!d.ordered]);
     have.push({ name, orig, restaurant_id: rid, restaurant_name: rname }); added++;
   }
   return { added, skipped };

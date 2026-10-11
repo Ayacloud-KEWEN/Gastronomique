@@ -193,7 +193,7 @@ function route(){
   $("#moreSheet").hidden = true;
   G.current = { r, params, id: parts[1] && decodeURIComponent(parts[1]) };
   clearAppClick();
-  ({home, discover, atlas, stories, graph, ai, item, map: mapView, compare, catalog, dupes, menu: menuPage, drafts: draftsPage}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
+  ({home, discover, atlas, stories, graph, ai, item, map: mapView, compare, catalog, dupes, menu: menuPage, drafts: draftsPage, glossary: glossaryPage}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
   updateCmpBar();
   $("#shareBtn").hidden = r==="ai";
   if (r!=="graph") window.scrollTo(0,0);
@@ -843,9 +843,12 @@ function graph(params){
   graphStop = () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
 }
 
-/* ---------- 扫菜单：拍照 → AI 识别翻译 → 与馆藏比对 → 新菜进草稿箱 ---------- */
+/* ---------- 扫菜单：拍照 → AI 识别翻译 → 与馆藏比对 → 新菜与术语进草稿箱 ---------- */
 let menuScan = null;   // 最近一次的识别结果（离开页面再回来仍在）
+const TERM_TAG = "菜单术语";
 const restaurants = () => db.items.filter(i => i.type==="restaurant").sort((a,b)=>a.name.localeCompare(b.name,"zh"));
+const termItems = () => db.items.filter(i => (i.tags||[]).includes(TERM_TAG));
+const today = () => new Date().toISOString().slice(0,10);
 // 压缩成最长边 1600px 的 JPEG，返回 { mime, data(base64), url }
 async function shrinkImage(file, max = 1600){
   const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
@@ -855,12 +858,28 @@ async function shrinkImage(file, max = 1600){
   const url = c.toDataURL("image/jpeg", 0.82);
   return { mime: "image/jpeg", data: url.split(",")[1], url };
 }
+// 菜单价格「18 €」「€18,50」「¥68」→ { price, currency }
+const PRICE_SYM = [["€","EUR"],["£","GBP"],["US$","USD"],["$","USD"],["円","JPY"],["JP¥","JPY"],["HK$","HKD"],["₩","KRW"],["฿","THB"],["CHF","CHF"],["NOK","NOK"],["SEK","SEK"],["DKK","DKK"],["¥","CNY"],["元","CNY"]];
+function parsePrice(t){
+  const s = String(t||""), m = s.replace(/\s/g,"").match(/(\d+(?:[.,]\d{1,2})?)/); if (!m) return {};
+  const cur = PRICE_SYM.find(([k]) => s.toUpperCase().includes(k.toUpperCase()));
+  return { price: +m[1].replace(",","."), currency: cur ? cur[1] : "" };
+}
+// 找到或建立餐厅（同名只建一次），返回 id；name 为空时返回 ""
+const restCache = {};
+async function ensureRestaurant(name, id = ""){
+  if (id && byId(id)) return id;
+  if (!name) return "";
+  const found = restaurants().find(r => r.name === name || r.alt === name); if (found) return found.id;
+  return restCache[name] ||= upsert(await api("/api/items", { method:"POST", body:{ type:"restaurant", name, tags:[] } })).id;
+}
 const restOf = st => !st.skip && st.restaurant ? restaurants().find(r => r.name===st.restaurant || r.alt===st.restaurant) : null;
+
 function menuPage(){
   if (!isAdmin()) { app.innerHTML = `<div class="empty">只有馆长可以使用扫菜单。</div>`; return; }
-  const st = menuScan ||= { photos: [], restaurant: "", skip: false, result: null, pick: {} };
+  const st = menuScan ||= { photos: [], restaurant: "", skip: false, result: null, pick: {}, ordered: {}, tpick: {}, archived: false };
   const rs = restaurants();
-  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>扫菜单 · Menu</h2><a class="muted" href="#/drafts">草稿箱 →</a></div>
+  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>扫菜单 · Menu</h2><span class="muted"><a href="#/glossary" style="color:var(--accent)">术语表</a> · <a href="#/drafts" style="color:var(--accent)">草稿箱 →</a></span></div>
   <div class="menu-scan panel">
     <label class="ms-rest">在哪家餐厅？
       <input id="msRest" list="msRestList" placeholder="选择已收藏的餐厅，或输入新餐厅名" value="${esc(st.restaurant)}" ${st.skip?"disabled":""}>
@@ -878,7 +897,7 @@ function menuPage(){
   $("#msSkip").onchange = () => { keep(); $("#msRest").disabled = st.skip; };
   if ($("#msFile")) $("#msFile").onchange = async e => {
     for (const f of [...e.target.files].slice(0, 8 - st.photos.length)) { try { st.photos.push(await shrinkImage(f)); } catch { toast("有一张图片无法读取"); } }
-    keep(); menuPage();
+    st.archived = false; keep(); menuPage();
   };
   $("#msPhotos").onclick = e => { const i = e.target.dataset.rm; if (i != null){ st.photos.splice(+i, 1); keep(); menuPage(); } };
   $("#msGo").onclick = async () => {
@@ -890,6 +909,8 @@ function menuPage(){
       st.result = await api("/api/menu/scan", { method:"POST", timeout: 330e3,
         body: { images: st.photos.map(p => ({ mime:p.mime, data:p.data })), hint: $("#msHint").value.trim(), provider: cfg.aiProvider || undefined } });
       st.pick = Object.fromEntries(st.result.dishes.map((d,i) => [i, !d.same]));
+      st.tpick = Object.fromEntries((st.result.terms||[]).map((t,i) => [i, !t.known]));
+      st.ordered = {};
       if (!st.restaurant && st.result.restaurant) { st.restaurant = st.result.restaurant; st.skip = false; }
       menuPage();
     } catch(e){ fail(e); $("#msGo").disabled = false; $("#msStat").textContent = ""; }
@@ -897,41 +918,109 @@ function menuPage(){
   if (st.result) renderMenuResult(st);
 }
 const dishLinks = (label, xs) => xs.length ? `<div class="md-rel">${label}：${xs.map(x=>`<a href="#/item/${encodeURIComponent(x.id)}" style="${tc(x.type)}"><span class="dot"></span>${esc(x.name)}</a>`).join("")}</div>` : "";
+const termChips = ts => ts?.length ? `<div class="md-terms">${ts.map(t => t.id ? `<a class="term-chip known" href="#/item/${encodeURIComponent(t.id)}">${esc(t.term)}</a>` : `<span class="term-chip">${esc(t.term)}</span>`).join("")}</div>` : "";
 const dishLine = (d, extra="") => `<div class="md-main"><b>${esc(d.name)}</b>${d.price?`<span class="md-price">${esc(d.price)}</span>`:""}</div>
-  ${d.orig && d.orig!==d.name?`<div class="md-orig">${esc(d.orig)}</div>`:""}${d.note?`<div class="md-note">${esc(d.note)}</div>`:""}${extra}`;
+  ${d.orig && d.orig!==d.name?`<div class="md-orig">${esc(d.orig)}</div>`:""}${d.note?`<div class="md-note">${esc(d.note)}</div>`:""}${termChips(d.terms)}${extra}`;
+const orderBtn = (st, i) => `<button type="button" class="sm order-tg ${st.ordered[i]?"on":""}" data-od="${i}" aria-pressed="${!!st.ordered[i]}">${st.ordered[i]?"✓ 点了":"点了"}</button>`;
+
 function renderMenuResult(st){
-  const r = st.result, ds = r.dishes.map((d,i) => [d,i]);
+  const r = st.result, ds = r.dishes.map((d,i) => [d,i]), terms = (r.terms||[]).map((t,i) => [t,i]);
   const same = ds.filter(([d]) => d.same), fresh = ds.filter(([d]) => !d.same);
-  const hit = ([d]) => { const it = byId(d.same.id);
-    return `<li class="md-row hit"><div class="md-body">${dishLine(d, `${dishLinks("馆藏", [d.same])}${it?`<span class="md-mine">${stars(it.rating)||statusTxt(it.status)}</span>`:""}${d.by==="ai"?`<small class="muted"> · AI 判断</small>`:""}${dishLinks("相关", d.related||[])}`)}</div></li>`; };
-  const nw = ([d,i]) => `<li class="md-row"><label class="cl-check"><input type="checkbox" data-pk="${i}" ${st.pick[i]?"checked":""}><i></i></label><div class="md-body">${dishLine(d, dishLinks("相关", d.related||[]))}</div></li>`;
+  const hit = ([d,i]) => { const it = byId(d.same.id);
+    return `<li class="md-row hit"><div class="md-body">${dishLine(d, `${dishLinks("馆藏", [d.same])}${it?`<span class="md-mine">${stars(it.rating)||statusTxt(it.status)}</span>`:""}${d.by==="ai"?`<small class="muted"> · AI 判断</small>`:""}${dishLinks("相关", d.related||[])}`)}</div>${orderBtn(st,i)}</li>`; };
+  const nw = ([d,i]) => `<li class="md-row"><label class="cl-check" title="加入草稿箱"><input type="checkbox" data-pk="${i}" ${st.pick[i]?"checked":""}><i></i></label><div class="md-body">${dishLine(d, dishLinks("相关", d.related||[]))}</div>${orderBtn(st,i)}</li>`;
+  const tRow = ([t,i]) => t.known
+    ? `<li class="md-row"><div class="md-body"><div class="md-main"><a href="#/item/${encodeURIComponent(t.known.id)}" style="color:var(--accent)"><b>${esc(t.term)}</b></a><span class="muted" style="font-size:12px">${esc(t.lang)} · 已收录</span></div><div class="md-note">${esc(t.name)}${t.note?` —— ${esc(t.note)}`:""}</div></div></li>`
+    : `<li class="md-row"><label class="cl-check" title="加入草稿箱"><input type="checkbox" data-tk="${i}" ${st.tpick[i]?"checked":""}><i></i></label><div class="md-body"><div class="md-main"><b>${esc(t.term)}</b><span class="muted" style="font-size:12px">${esc(t.lang)}</span></div><div class="md-note"><b>${esc(t.name)}</b>${t.note?` —— ${esc(t.note)}`:""}${t.example?`<br><i>例：${esc(t.example)}</i>`:""}</div></div></li>`;
   const sections = list => { const g = new Map(); for (const x of list){ const k = x[0].section || "其他"; (g.get(k) || g.set(k,[]).get(k)).push(x); } return [...g]; };
-  const rr = restOf(st);
-  $("#msOut").innerHTML = `<div class="ms-sum muted">${st.skip ? "未关联餐厅" : `餐厅：<b>${esc(st.restaurant)}</b>${rr?"":"（新餐厅，转为藏品时会一并建立）"}`}${r.language?` · ${esc(r.language)}`:""} · 共 ${r.dishes.length} 道 · ${esc(r.model||"")} · ${Math.round(r.ms/1000)} 秒</div>
+  const rr = restOf(st), ordHits = same.filter(([,i]) => st.ordered[i]);
+  $("#msOut").innerHTML = `<div class="ms-sum muted">${st.skip ? "未关联餐厅" : `餐厅：<b>${esc(st.restaurant)}</b>${rr?"":"（新餐厅，存档或入藏时会一并建立）"}`}${r.language?` · ${esc(r.language)}`:""} · 共 ${r.dishes.length} 道 · ${esc(r.model||"")} · ${Math.round(r.ms/1000)} 秒</div>
     ${r.warning?`<p class="muted" style="font-size:13px">⚠ ${esc(r.warning)}</p>`:""}
-    <section class="collection"><div class="cl-head"><h3>✓ 已收藏 · ${same.length}</h3></div>${same.length?`<ul>${same.map(hit).join("")}</ul>`:`<p class="muted">菜单上没有已收藏的菜。</p>`}</section>
+    ${!st.skip && st.photos.length ? `<div class="ms-arch">${st.archived ? `<span class="muted">✓ 菜单照片已存入餐厅</span>` : `<button class="sm" id="mdArch">📁 把菜单照片存入餐厅「${esc(st.restaurant)}」</button>`}</div>` : ""}
+    <section class="collection"><div class="cl-head"><h3>✓ 已收藏 · ${same.length}</h3>${same.length?`<button class="sm primary" id="mdJ" ${ordHits.length?"":"disabled"}>记入品尝日志（${ordHits.length}）</button>`:""}</div>
+      ${same.length?`<p class="muted" style="font-size:12px;margin:0 0 4px">点了哪道就按「点了」，再记入品尝日志：会记下日期、餐厅和价格，并标记为已品尝。</p><ul>${same.map(hit).join("")}</ul>`:`<p class="muted">菜单上没有已收藏的菜。</p>`}</section>
     <section class="collection"><div class="cl-head"><h3>＋ 新菜 · ${fresh.length}</h3>${fresh.length?`<div class="seg"><button class="sm" id="mdAll">全选</button><button class="sm" id="mdNone">全不选</button></div>`:""}</div>
-      ${sections(fresh).map(([k, xs]) => `<div class="cl-group"><div class="cl-gh"><span>${esc(k)}</span><span class="muted">${xs.length}</span></div><ul>${xs.map(nw).join("")}</ul></div>`).join("") || `<p class="muted">没有新菜。</p>`}
-      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">${fresh.length?`<button class="primary" id="mdSave">加入草稿箱（<span id="mdN">0</span>）</button>`:""}<button class="ghost" id="mdClear">清空本次结果</button></div></section>`;
-  const count = () => { const n = fresh.filter(([,i]) => st.pick[i]).length; if ($("#mdN")) $("#mdN").textContent = n; return n; };
+      ${fresh.length?`<p class="muted" style="font-size:12px;margin:0 0 4px">勾选的菜会进草稿箱；按了「点了」的，入藏时标记为已品尝，否则为想尝。</p>`:""}
+      ${sections(fresh).map(([k, xs]) => `<div class="cl-group"><div class="cl-gh"><span>${esc(k)}</span><span class="muted">${xs.length}</span></div><ul>${xs.map(nw).join("")}</ul></div>`).join("") || `<p class="muted">没有新菜。</p>`}</section>
+    ${terms.length?`<section class="collection"><div class="cl-head"><h3>📖 菜单术语 · ${terms.length}</h3><a class="muted" href="#/glossary" style="font-size:13px">术语表 →</a></div><ul>${terms.map(tRow).join("")}</ul></section>`:""}
+    <div style="display:flex;gap:8px;margin:4px 0 24px;flex-wrap:wrap"><button class="primary" id="mdSave">加入草稿箱（<span id="mdN">0</span>）</button><button class="ghost" id="mdClear">清空本次结果</button></div>`;
+  const count = () => { const n = fresh.filter(([,i]) => st.pick[i]).length + terms.filter(([t,i]) => !t.known && st.tpick[i]).length;
+    $("#mdN").textContent = n; $("#mdSave").disabled = !n; return n; };
   count();
-  $("#msOut").onchange = e => { const i = e.target.dataset.pk; if (i != null){ st.pick[i] = e.target.checked; count(); } };
-  if ($("#mdAll")) { $("#mdAll").onclick = () => { fresh.forEach(([,i]) => st.pick[i] = true); renderMenuResult(st); };
-    $("#mdNone").onclick = () => { fresh.forEach(([,i]) => st.pick[i] = false); renderMenuResult(st); }; }
-  $("#mdClear").onclick = () => { if (confirm("清空本次识别结果和照片？")) { menuScan = null; menuPage(); } };
-  if ($("#mdSave")) $("#mdSave").onclick = async () => {
-    if (!count()) return toast("没有选中的菜");
-    const dishes = fresh.filter(([,i]) => st.pick[i]).map(([d]) => ({ ...d, related: (d.related||[]).map(x => x.id) }));
-    try {
-      const res = await api("/api/drafts", { method:"POST", body: { dishes, restaurantId: restOf(st)?.id || "", restaurantName: st.skip ? "" : st.restaurant } });
-      toast(`已加入草稿箱 ${res.added} 道${res.skipped?`，${res.skipped} 道已在草稿箱中`:""}`);
-      fresh.forEach(([,i]) => st.pick[i] = false); renderMenuResult(st);
-    } catch(e){ fail(e); }
+  $("#msOut").onchange = e => { const { pk, tk } = e.target.dataset;
+    if (pk != null) st.pick[pk] = e.target.checked; if (tk != null) st.tpick[tk] = e.target.checked; count(); };
+  $("#msOut").onclick = async e => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.od != null) { const i = b.dataset.od; st.ordered[i] = !st.ordered[i]; if (st.ordered[i] && !r.dishes[i].same) st.pick[i] = true; renderMenuResult(st); }
+    else if (b.id === "mdAll" || b.id === "mdNone") { fresh.forEach(([,i]) => st.pick[i] = b.id === "mdAll"); renderMenuResult(st); }
+    else if (b.id === "mdClear") { if (confirm("清空本次识别结果和照片？")) { menuScan = null; menuPage(); } }
+    else if (b.id === "mdArch") archiveMenuPhotos(st, b).catch(fail);
+    else if (b.id === "mdJ") logOrdered(st, ordHits, b).catch(fail);
+    else if (b.id === "mdSave") saveMenuDrafts(st, fresh, terms).catch(fail);
   };
+}
+// 已收藏且点了的菜：各写一条品尝日志，并标记为已品尝
+async function logOrdered(st, hits, btn){
+  btn.disabled = true;
+  const place = st.skip ? "" : st.restaurant; let n = 0;
+  for (const [d, i] of hits) {
+    const id = d.same.id, { price, currency } = parsePrice(d.price);
+    const body = { date: today(), place, shop: place, text: `${place ? `在${place}` : ""}点了这道菜${d.orig && d.orig !== d.name ? `（菜单上写作 ${d.orig}）` : ""}`, price: price ?? "", currency: currency || "" };
+    const saved = await api(`/api/items/${encodeURIComponent(id)}/journal`, { method:"POST", body });
+    let it = saved?.id ? upsert(saved) : byId(id);
+    if (it && it.status !== "tried") upsert(await api("/api/items/"+encodeURIComponent(id), { method:"PATCH", body:{ status:"tried" } }));
+    st.ordered[i] = false; n++;
+  }
+  toast(`已记入 ${n} 道菜的品尝日志`); renderMenuResult(st);
+}
+// 把本次的菜单照片存进餐厅藏品的图片里
+async function archiveMenuPhotos(st, btn){
+  btn.disabled = true; btn.textContent = "正在上传…";
+  const rid = await ensureRestaurant(st.restaurant, restOf(st)?.id);
+  const ups = [];
+  for (const [k, p] of st.photos.entries()) {
+    const blob = await (await fetch(p.url)).blob();
+    const fd = new FormData(); fd.append("file", new File([blob], `menu-${today()}-${k+1}.jpg`, { type: "image/jpeg" }));
+    ups.push({ ...(await api("/api/media", { method:"POST", body: fd })), caption: `菜单 · ${today()}${st.photos.length > 1 ? ` · 第 ${k+1} 张` : ""}` });
+  }
+  const it = byId(rid);
+  upsert(await api("/api/items/"+encodeURIComponent(rid), { method:"PUT", body: { ...it, media: [...(it.media||[]), ...ups] } }));
+  st.archived = true; toast(`已把 ${ups.length} 张菜单照片存入「${it.name}」`); renderMenuResult(st);
+}
+async function saveMenuDrafts(st, fresh, terms){
+  const dishes = [
+    ...fresh.filter(([,i]) => st.pick[i]).map(([d,i]) => ({ ...d, related: (d.related||[]).map(x => x.id), ordered: !!st.ordered[i] })),
+    ...terms.filter(([t,i]) => !t.known && st.tpick[i]).map(([t]) => ({ type: "culture", name: t.name || t.term, orig: t.term, section: "术语",
+      note: t.note + (t.example ? `（例：${t.example}）` : ""), tags: [TERM_TAG, t.lang].filter(Boolean) })),
+  ];
+  if (!dishes.length) return toast("没有选中的内容");
+  const res = await api("/api/drafts", { method:"POST", body: { dishes, restaurantId: restOf(st)?.id || "", restaurantName: st.skip ? "" : st.restaurant } });
+  toast(`已加入草稿箱 ${res.added} 条${res.skipped?`，${res.skipped} 条已在草稿箱中`:""}`);
+  fresh.forEach(([,i]) => st.pick[i] = false); terms.forEach(([,i]) => st.tpick[i] = false); renderMenuResult(st);
 }
 
 /* ---------- 草稿箱：整理后批量转为藏品 ---------- */
 const draftGroup = d => `${d.restaurantName || "未关联餐厅"}|${d.date}`;
+const normKey = s => String(s||"").normalize("NFKD").replace(/[̀-ͯ]/g,"").toLowerCase().replace(/[^\p{L}\p{N}]+/gu,"");
+// 草稿 → 藏品字段
+function draftToItem(d, rid){
+  const isTerm = (d.tags||[]).includes(TERM_TAG) || d.type === "culture" && d.section === "术语";
+  const rels = [];
+  if (isTerm) {
+    // 术语 → 已有菜品：外文名里含有这个术语的菜
+    const k = normKey(d.orig);
+    if (k.length >= 3) db.items.filter(x => x.type === "dish" && normKey(x.alt).includes(k)).slice(0, 30).forEach(x => rels.push({ to: x.id, label: "用于" }));
+  } else {
+    if (rid) rels.push({ to: rid, label: MEMBER_LABEL });
+    const o = normKey(d.orig);
+    termItems().filter(t => { const k = normKey(t.alt.split(/\s*[·/|]\s*/)[0] || t.name); return k.length >= 3 && o.includes(k); }).forEach(t => rels.push({ to: t.id, label: "相关" }));
+  }
+  d.related.filter(byId).forEach(to => rels.push({ to, label: "相关" }));
+  return { type: d.type, name: d.name, alt: d.orig, summary: d.note, health: isTerm ? {} : { ingredients: d.ingredients },
+    tags: isTerm ? [...new Set([TERM_TAG, ...(d.tags||[])])] : d.tags,
+    status: isTerm ? "" : d.ordered ? "tried" : "want", region: !isTerm && rid ? (byId(rid)?.region || "") : "",
+    source: `菜单扫描 · ${d.restaurantName || "未关联餐厅"} · ${d.date}${d.price ? ` · ${d.price}` : ""}`, relations: rels };
+}
 async function draftsPage(){
   if (!isAdmin()) { app.innerHTML = `<div class="empty">只有馆长可以查看草稿箱。</div>`; return; }
   app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>草稿箱 · Drafts</h2><a class="muted" href="#/menu">扫菜单 →</a></div><div id="dfOut" class="muted">加载中…</div>`;
@@ -941,55 +1030,64 @@ async function draftsPage(){
   const draw = () => {
     const out = $("#dfOut"); if (!out) return;
     out.className = "";
-    if (!list.length) { out.innerHTML = `<div class="empty">草稿箱是空的。在餐厅扫菜单时，没收藏过的菜会放到这里。</div>`; return; }
+    if (!list.length) { out.innerHTML = `<div class="empty">草稿箱是空的。在餐厅扫菜单时，没收藏过的菜和术语会放到这里。</div>`; return; }
     const g = new Map(); for (const d of list) (g.get(draftGroup(d)) || g.set(draftGroup(d), []).get(draftGroup(d))).push(d);
-    out.innerHTML = `<div class="df-bar"><span class="muted">${list.length} 道待整理 · 已选 <b>${pick.size}</b></span>
+    out.innerHTML = `<div class="df-bar"><span class="muted">${list.length} 条待整理 · 已选 <b>${pick.size}</b></span>
       <button class="sm" id="dfAll">${pick.size===list.length?"全不选":"全选"}</button>
       <button class="primary sm" id="dfGo" ${pick.size?"":"disabled"}>转为藏品</button><button class="danger sm" id="dfDel" ${pick.size?"":"disabled"}>丢弃</button></div>
     ${[...g].map(([k, ds]) => { const [rn, date] = k.split("|");
-      return `<section class="collection"><div class="cl-head"><h3>${esc(rn)}</h3><span class="muted">${date} · ${ds.length} 道</span><button class="sm ghost" data-grp="${esc(k)}">选这一组</button></div>
+      return `<section class="collection"><div class="cl-head"><h3>${esc(rn)}</h3><span class="muted">${date} · ${ds.length} 条</span><button class="sm ghost" data-grp="${esc(k)}">选这一组</button></div>
         <ul>${ds.map(d => `<li class="md-row"><label class="cl-check"><input type="checkbox" data-df="${d.id}" ${pick.has(d.id)?"checked":""}><i></i></label>
-        <div class="md-body"><div class="md-main"><b>${esc(d.name)}</b>${chip(d.type)}${d.section?`<span class="muted" style="font-size:12px">${esc(d.section)}</span>`:""}${d.price?`<span class="md-price">${esc(d.price)}</span>`:""}</div>
+        <div class="md-body"><div class="md-main"><b>${esc(d.name)}</b>${d.section==="术语"?`<span class="term-chip">术语</span>`:chip(d.type)}${d.ordered?`<span class="status tried">● 点了</span>`:""}${d.section && d.section!=="术语"?`<span class="muted" style="font-size:12px">${esc(d.section)}</span>`:""}${d.price?`<span class="md-price">${esc(d.price)}</span>`:""}</div>
         ${d.orig?`<div class="md-orig">${esc(d.orig)}</div>`:""}${d.note?`<div class="md-note">${esc(d.note)}</div>`:""}
         ${dishLinks("相关", d.related.map(byId).filter(Boolean))}</div>
         <button class="sm ghost" data-ed="${d.id}" title="编辑后入藏">✎</button></li>`).join("")}</ul></section>`; }).join("")}`;
   };
   draw();
   const remove = async ids => { await api("/api/drafts/delete", { method:"POST", body:{ ids } }); list = list.filter(d => !ids.includes(d.id)); ids.forEach(i => pick.delete(i)); draw(); };
-  // 餐厅不存在时先建餐厅（同名只建一次）
-  const restCache = {};
-  const ensureRest = async d => {
-    if (d.restaurantId && byId(d.restaurantId)) return d.restaurantId;
-    if (!d.restaurantName) return "";
-    const found = restaurants().find(r => r.name === d.restaurantName); if (found) return found.id;
-    if (restCache[d.restaurantName]) return restCache[d.restaurantName];
-    const r = upsert(await api("/api/items", { method:"POST", body:{ type:"restaurant", name:d.restaurantName, tags:[] } }));
-    return restCache[d.restaurantName] = r.id;
-  };
-  const toItem = (d, rid) => ({ type: d.type, name: d.name, alt: d.orig, summary: d.note, tags: d.tags, status: "tried",
-    health: { ingredients: d.ingredients }, region: rid ? (byId(rid)?.region || "") : "",
-    source: `菜单扫描 · ${d.restaurantName || "未关联餐厅"} · ${d.date}${d.price ? ` · ${d.price}` : ""}`,
-    relations: [...(rid ? [{ to: rid, label: MEMBER_LABEL }] : []), ...d.related.filter(byId).map(to => ({ to, label: "相关" }))] });
+  const ridOf = d => d.section === "术语" ? Promise.resolve("") : ensureRestaurant(d.restaurantName, d.restaurantId);
   $("#dfOut").onchange = e => { const id = e.target.dataset.df; if (id){ e.target.checked ? pick.add(id) : pick.delete(id); draw(); } };
   $("#dfOut").onclick = async e => {
     const t = e.target.closest("button"); if (!t) return;
     if (t.id === "dfAll") { pick.size === list.length ? pick.clear() : list.forEach(d => pick.add(d.id)); draw(); }
     else if (t.dataset.grp) { list.filter(d => draftGroup(d) === t.dataset.grp).forEach(d => pick.add(d.id)); draw(); }
-    else if (t.id === "dfDel") { if (confirm(`丢弃选中的 ${pick.size} 道草稿？`)) remove([...pick]).catch(fail); }
+    else if (t.id === "dfDel") { if (confirm(`丢弃选中的 ${pick.size} 条草稿？`)) remove([...pick]).catch(fail); }
     else if (t.id === "dfGo") {
-      if (!confirm(`把选中的 ${pick.size} 道转为藏品？\n它们会标记为「已品尝」，并关联到所在餐厅。`)) return;
+      if (!confirm(`把选中的 ${pick.size} 条转为藏品？\n菜品会关联到所在餐厅；点了的标记为「已品尝」，其余为「想尝」。`)) return;
       t.disabled = true; const done = [];
-      try { for (const d of list.filter(x => pick.has(x.id))) { const rid = await ensureRest(d); upsert(await api("/api/items", { method:"POST", body: toItem(d, rid) })); done.push(d.id); } }
+      // 先入术语，再入菜品，菜品才能关联到刚收录的术语
+      const order = list.filter(x => pick.has(x.id)).sort((a,b) => (b.section==="术语") - (a.section==="术语"));
+      try { for (const d of order) { upsert(await api("/api/items", { method:"POST", body: draftToItem(d, await ridOf(d)) })); done.push(d.id); } }
       catch(err){ fail(err); }
-      if (done.length) { toast(`已入藏 ${done.length} 道`); await remove(done).catch(fail); }
+      if (done.length) { toast(`已入藏 ${done.length} 条`); await remove(done).catch(fail); }
     }
     else if (t.dataset.ed) {
       const d = list.find(x => x.id === t.dataset.ed);
-      try { const rid = await ensureRest(d); editor(null, toItem(d, rid));
+      try { editor(null, draftToItem(d, await ridOf(d)));
         editorHook = () => api("/api/drafts/delete", { method:"POST", body:{ ids:[d.id] } }).catch(() => {}); }
       catch(err){ fail(err); }
     }
   };
+}
+
+/* ---------- 菜单术语表：带「菜单术语」标签的藏品，按语言分组 ---------- */
+function glossaryPage(params){
+  const q = (params?.get("q") || "").trim();
+  const all = termItems();
+  const langOf = t => (t.tags||[]).find(x => x !== TERM_TAG) || "其他";
+  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>菜单术语表 · Glossary</h2><span class="muted">${all.length} 条${isAdmin()?` · <a href="#/menu" style="color:var(--accent)">扫菜单 →</a>`:""}</span></div>
+    <div class="filters"><input id="gsq" placeholder="搜索术语或中文解释，如 confit、油封" value="${esc(q)}"></div><div id="gsOut"></div>`;
+  const draw = s => {
+    const k = s.toLowerCase();
+    const xs = all.filter(t => !k || [t.name, t.alt, t.summary].join(" ").toLowerCase().includes(k));
+    if (!all.length) { $("#gsOut").innerHTML = `<div class="empty">还没有收录术语。扫菜单时，AI 会把菜单上的厨房用语单独列出，勾选后进草稿箱，转为藏品即收进术语表。</div>`; return; }
+    const g = new Map(); for (const t of xs.sort((a,b) => (a.alt||a.name).localeCompare(b.alt||b.name))) (g.get(langOf(t)) || g.set(langOf(t), []).get(langOf(t))).push(t);
+    $("#gsOut").innerHTML = [...g].map(([lang, ts]) => `<section class="collection"><div class="cl-head"><h3>${esc(lang)}</h3><span class="muted">${ts.length}</span></div><ul>${ts.map(t => {
+      const used = neighbors(t.id).filter(n => n.item.type === "dish").length;
+      return `<li class="md-row"><div class="md-body"><div class="md-main"><a href="#/item/${encodeURIComponent(t.id)}" style="color:var(--accent)"><b>${esc(t.alt || t.name)}</b></a><span>${esc(t.alt ? t.name : "")}</span>${used?`<span class="md-price">${used} 道菜</span>`:""}</div>${t.summary?`<div class="md-note">${esc(t.summary)}</div>`:""}</div></li>`; }).join("")}</ul></section>`).join("") || `<p class="muted">没有找到。</p>`;
+  };
+  $("#gsq").oninput = e => draw(e.target.value);
+  draw(q);
 }
 
 /* ---------- 品味统计（供 AI 推荐使用） ---------- */
