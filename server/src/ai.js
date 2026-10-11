@@ -130,12 +130,15 @@ export async function complete({ prompt, system, provider, maxTokens = 4000, att
     res = await fetch(`${c.baseUrl}/chat/completions`, {
       method: "POST", signal: ctl,
       headers: { "content-type": "application/json", authorization: `Bearer ${c.key}` },
-      body: JSON.stringify({ model, max_tokens: Math.min(maxTokens, 8192), stream: false,
+      // 推理模型会先消耗 token 思考，上限给得太小会导致正文为空
+      body: JSON.stringify({ model, max_tokens: Math.min(maxTokens, 32000), stream: false,
         messages: [...(system ? [{ role: "system", content: String(system) }] : []), { role: "user", content }] }),
     });
     j = await res.json().catch(() => ({}));
     if (!res.ok) throw err(`DeepSeek：${j.error?.message || res.status}`);
-    return { provider: id, model, text: j.choices?.[0]?.message?.content || "" };
+    const ch = j.choices?.[0] || {};
+    if (!ch.message?.content && ch.finish_reason === "length") throw err("DeepSeek：输出长度超出上限，内容被截断（可减少照片或资料后重试）");
+    return { provider: id, model, text: ch.message?.content || "" };
   } catch (e) {
     if (e.statusCode) throw e;
     throw err(`${PROVIDERS[id].label} 连接失败：${e.name === "TimeoutError" ? "超时" : e.message}`);

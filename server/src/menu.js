@@ -35,7 +35,7 @@ const READ_SCHEMA = `{"restaurant":"菜单上能看到的餐厅名，看不到�
  "terms":[{"term":"术语原文","lang":"语言，如 法语","zh":"中文译名","explain":"一两句解释：是什么做法或状态","example":"菜单上用到它的一道菜原文"}]}`;
 
 async function readMenu(images, provider, hint) {
-  const r = await ai.complete({ provider, system: READ_SYS, attachments: images, maxTokens: 8000, timeoutMs: 240e3,
+  const r = await ai.complete({ provider, system: READ_SYS, attachments: images, maxTokens: 16000, timeoutMs: 240e3,
     prompt: `共 ${images.length} 张菜单照片。${hint ? `补充说明：${hint}\n` : ""}按以下 JSON 结构输出：\n${READ_SCHEMA}` });
   let d;
   try { d = parseJsonLoose(r.text); } catch { throw bad("AI 返回的菜单无法解析，请重拍或少放几张照片后再试", 502); }
@@ -45,7 +45,8 @@ async function readMenu(images, provider, hint) {
   })).filter(x => x.name).slice(0, 120);
   const seen = new Set();
   const terms = (Array.isArray(d.terms) ? d.terms : []).map(x => ({
-    term: str(x.term, 100), lang: str(x.lang, 20), name: str(x.zh, 100), note: str(x.explain, 400), example: str(x.example, 200),
+    // 语言只留第一个，如「法语（源自西班牙语）」→「法语」，术语表按它分组
+    term: str(x.term, 100), lang: (str(x.lang, 40).match(/[一-鿿]{1,6}语/) || [str(x.lang, 20)])[0], name: str(x.zh, 100), note: str(x.explain, 400), example: str(x.example, 200),
   })).filter(x => x.term && !seen.has(norm(x.term)) && seen.add(norm(x.term))).slice(0, 40);
   return { restaurant: str(d.restaurant, 200), language: str(d.language, 40), dishes, terms, model: r.model, provider: r.provider };
 }
@@ -70,7 +71,8 @@ const MATCH_SYS = `你是一座私人食物博物馆的编目员。判断餐厅�
 - 只从给出的候选中选，不确定就不选。只输出 JSON。`;
 
 export async function matchMenu(dishes, provider) {
-  const items = (await q("SELECT id, type, name, alt, summary FROM items WHERE type <> 'restaurant'")).rows;
+  // 只和具体的食物比对；海报、指南、地区这类总条目会关联到几乎每道菜，反而成了干扰
+  const items = (await q("SELECT id, type, name, alt, summary FROM items WHERE type IN ('ingredient','dish','beverage','cuisine')")).rows;
   const byId = new Map(items.map(x => [x.id, x]));
   const out = dishes.map(() => ({ same: null, related: [] }));
   const pool = new Map();   // 交给 AI 的候选
@@ -98,7 +100,7 @@ ${todo.map(i => `${i} | ${dishes[i].orig} | ${dishes[i].name} | ${dishes[i].note
 
 按 JSON 输出：{"matches":[{"i":序号,"same":"候选 id 或 null","related":["候选 id"]}]}`;
     try {
-      const r = await ai.complete({ provider, system: MATCH_SYS, prompt, maxTokens: 4000, timeoutMs: 120e3 });
+      const r = await ai.complete({ provider, system: MATCH_SYS, prompt, maxTokens: 16000, timeoutMs: 180e3 });
       for (const m of parseJsonLoose(r.text).matches || []) {
         const i = +m.i; if (!todo.includes(i)) continue;
         if (m.same && pool.has(m.same)) { out[i].same = m.same; out[i].by = "ai"; }

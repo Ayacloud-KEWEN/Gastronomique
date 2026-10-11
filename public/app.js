@@ -965,7 +965,7 @@ async function logOrdered(st, hits, btn){
   const place = st.skip ? "" : st.restaurant; let n = 0;
   for (const [d, i] of hits) {
     const id = d.same.id, { price, currency } = parsePrice(d.price);
-    const body = { date: today(), place, shop: place, text: `${place ? `在${place}` : ""}点了这道菜${d.orig && d.orig !== d.name ? `（菜单上写作 ${d.orig}）` : ""}`, price: price ?? "", currency: currency || "" };
+    const body = { date: today(), place, shop: place, text: `${place ? `在 ${place} ` : ""}点了这道菜${d.orig && d.orig !== d.name ? `（菜单上写作 ${d.orig}）` : ""}`, price: price ?? "", currency: currency || "" };
     const saved = await api(`/api/items/${encodeURIComponent(id)}/journal`, { method:"POST", body });
     let it = saved?.id ? upsert(saved) : byId(id);
     if (it && it.status !== "tried") upsert(await api("/api/items/"+encodeURIComponent(id), { method:"PATCH", body:{ status:"tried" } }));
@@ -1017,7 +1017,8 @@ function draftToItem(d, rid){
   }
   d.related.filter(byId).forEach(to => rels.push({ to, label: "相关" }));
   return { type: d.type, name: d.name, alt: d.orig, summary: d.note, health: isTerm ? {} : { ingredients: d.ingredients },
-    tags: isTerm ? [...new Set([TERM_TAG, ...(d.tags||[])])] : d.tags,
+    // 菜单分区放在标签第一位：餐厅页的打卡清单会按「前菜 / 主菜 / 甜点」分组
+    tags: isTerm ? [...new Set([TERM_TAG, ...(d.tags||[])])] : [...new Set([d.section, ...(d.tags||[])].filter(Boolean))],
     status: isTerm ? "" : d.ordered ? "tried" : "want", region: !isTerm && rid ? (byId(rid)?.region || "") : "",
     source: `菜单扫描 · ${d.restaurantName || "未关联餐厅"} · ${d.date}${d.price ? ` · ${d.price}` : ""}`, relations: rels };
 }
