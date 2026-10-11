@@ -11,6 +11,8 @@ export const PROVIDERS = {
   deepseek: {
     label: "DeepSeek", baseUrl: "https://api.deepseek.com", envKey: "DEEPSEEK_API_KEY", envModel: "DEEPSEEK_MODEL",
     models: ["deepseek-flash", "deepseek-v4-pro"],
+    // 带图片的请求改用视觉模型（文本模型收到图片会返回 400）
+    visionModel: process.env.DEEPSEEK_VISION_MODEL || "deepseek-v4-flash-vision-exp",
   },
 };
 
@@ -90,7 +92,10 @@ export async function resolveProvider(provider) {
   return provider && r.providers[provider]?.key ? provider : r.default;
 }
 
-// attachments：[{ kind:"image", mime, data(base64) } | { kind:"pdf", data(base64) }]，仅 Claude 支持
+// 能否读图：Claude 支持图片与 PDF；DeepSeek 只支持图片（经视觉模型）
+export const canSee = (provider, kind = "image") => provider === "claude" || (provider === "deepseek" && kind === "image");
+
+// attachments：[{ kind:"image", mime, data(base64) } | { kind:"pdf", data(base64) }]
 export async function complete({ prompt, system, provider, maxTokens = 4000, attachments = [], timeoutMs = 120e3 }) {
   const r = await resolved();
   const id = provider && r.providers[provider]?.key ? provider : r.default;
@@ -115,15 +120,22 @@ export async function complete({ prompt, system, provider, maxTokens = 4000, att
       if (!res.ok) throw err(`Claude：${j.error?.message || res.status}`);
       return { provider: id, model: c.model, text: (j.content || []).filter(x => x.type === "text").map(x => x.text).join("") };
     }
+    const imgs = attachments.filter(a => a.kind !== "pdf");
+    if (imgs.length < attachments.length) throw err("DeepSeek 不支持 PDF 附件，请改用 Claude 或上传图片", 400);
+    const model = imgs.length ? PROVIDERS.deepseek.visionModel : c.model;
+    const content = imgs.length ? [
+      ...imgs.map(a => ({ type: "image_url", image_url: { url: `data:${a.mime};base64,${a.data}` } })),
+      { type: "text", text: String(prompt || "") },
+    ] : String(prompt || "");
     res = await fetch(`${c.baseUrl}/chat/completions`, {
       method: "POST", signal: ctl,
       headers: { "content-type": "application/json", authorization: `Bearer ${c.key}` },
-      body: JSON.stringify({ model: c.model, max_tokens: Math.min(maxTokens, 8192), stream: false,
-        messages: [...(system ? [{ role: "system", content: String(system) }] : []), { role: "user", content: String(prompt || "") }] }),
+      body: JSON.stringify({ model, max_tokens: Math.min(maxTokens, 8192), stream: false,
+        messages: [...(system ? [{ role: "system", content: String(system) }] : []), { role: "user", content }] }),
     });
     j = await res.json().catch(() => ({}));
     if (!res.ok) throw err(`DeepSeek：${j.error?.message || res.status}`);
-    return { provider: id, model: c.model, text: j.choices?.[0]?.message?.content || "" };
+    return { provider: id, model, text: j.choices?.[0]?.message?.content || "" };
   } catch (e) {
     if (e.statusCode) throw e;
     throw err(`${PROVIDERS[id].label} 连接失败：${e.name === "TimeoutError" ? "超时" : e.message}`);

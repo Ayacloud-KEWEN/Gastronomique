@@ -193,7 +193,7 @@ function route(){
   $("#moreSheet").hidden = true;
   G.current = { r, params, id: parts[1] && decodeURIComponent(parts[1]) };
   clearAppClick();
-  ({home, discover, atlas, stories, graph, ai, item, map: mapView, compare, catalog, dupes}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
+  ({home, discover, atlas, stories, graph, ai, item, map: mapView, compare, catalog, dupes, menu: menuPage, drafts: draftsPage}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
   updateCmpBar();
   $("#shareBtn").hidden = r==="ai";
   if (r!=="graph") window.scrollTo(0,0);
@@ -637,7 +637,7 @@ function editor(it, preset={}, focus=""){
       if (sim && !confirm(`已有相似藏品「${sim.x.name}」（${sim.s.why}）。\n仍要新建一件吗？`)) return;
     }
     e.target.disabled = true;
-    const finish = (id, msg) => { clearTimeout(draftT); if (isNew) localStorage.removeItem(DRAFT); closeModal(); toast(msg); go("#/item/"+encodeURIComponent(id)); route(); };
+    const finish = (id, msg) => { clearTimeout(draftT); if (isNew) localStorage.removeItem(DRAFT); editorHook?.(id); closeModal(); toast(msg); go("#/item/"+encodeURIComponent(id)); route(); };
     try {
       if (String(d.id||"").startsWith("tmp-")) throw Object.assign(new Error("待同步"), { offline: true });   // 尚未同步的离线新建：继续走队列
       await uploadLocalMedia(out);
@@ -652,7 +652,8 @@ function editor(it, preset={}, focus=""){
   };
 }
 function openModal(){ $("#modal").hidden = false; }
-function closeModal(){ const m = $("#modal"); m.hidden = true; m.classList.remove("sheet"); delete m.dataset.lock; delete m.dataset.dirty; m._cancel = null; }
+let editorHook = null;   // 编辑器保存成功后的回调（如删除对应草稿），关闭时清空
+function closeModal(){ editorHook = null; const m = $("#modal"); m.hidden = true; m.classList.remove("sheet"); delete m.dataset.lock; delete m.dataset.dirty; m._cancel = null; }
 // 点击遮罩：普通弹窗关闭；录入表单（lock）不关闭，只晃动提示，避免误触丢失内容
 $("#modal").onclick = e => {
   if (e.target.id !== "modal") return;
@@ -840,6 +841,155 @@ function graph(params){
   const t0 = performance.now(); while (alpha > 0.02 && performance.now() - t0 < 400) step();
   fit(); tick();
   graphStop = () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
+}
+
+/* ---------- 扫菜单：拍照 → AI 识别翻译 → 与馆藏比对 → 新菜进草稿箱 ---------- */
+let menuScan = null;   // 最近一次的识别结果（离开页面再回来仍在）
+const restaurants = () => db.items.filter(i => i.type==="restaurant").sort((a,b)=>a.name.localeCompare(b.name,"zh"));
+// 压缩成最长边 1600px 的 JPEG，返回 { mime, data(base64), url }
+async function shrinkImage(file, max = 1600){
+  const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = Object.assign(document.createElement("canvas"), { width: Math.round(bmp.width*k), height: Math.round(bmp.height*k) });
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  const url = c.toDataURL("image/jpeg", 0.82);
+  return { mime: "image/jpeg", data: url.split(",")[1], url };
+}
+const restOf = st => !st.skip && st.restaurant ? restaurants().find(r => r.name===st.restaurant || r.alt===st.restaurant) : null;
+function menuPage(){
+  if (!isAdmin()) { app.innerHTML = `<div class="empty">只有馆长可以使用扫菜单。</div>`; return; }
+  const st = menuScan ||= { photos: [], restaurant: "", skip: false, result: null, pick: {} };
+  const rs = restaurants();
+  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>扫菜单 · Menu</h2><a class="muted" href="#/drafts">草稿箱 →</a></div>
+  <div class="menu-scan panel">
+    <label class="ms-rest">在哪家餐厅？
+      <input id="msRest" list="msRestList" placeholder="选择已收藏的餐厅，或输入新餐厅名" value="${esc(st.restaurant)}" ${st.skip?"disabled":""}>
+      <datalist id="msRestList">${rs.map(r=>`<option value="${esc(r.name)}">${esc(r.region||"")}</option>`).join("")}</datalist></label>
+    <label class="gchk"><input type="checkbox" id="msSkip" ${st.skip?"checked":""}> 这次不关联餐厅</label>
+    <div class="ms-photos" id="msPhotos">${st.photos.map((p,i)=>`<figure><img src="${p.url}" alt="菜单第 ${i+1} 张"><button class="sm ghost" data-rm="${i}" aria-label="移除">×</button></figure>`).join("")}
+      ${st.photos.length < 8 ? `<label class="ms-add"><input type="file" id="msFile" accept="image/*" multiple hidden><span>＋ 拍照 / 选图</span></label>` : ""}</div>
+    <input id="msHint" placeholder="可选：补充说明，如「只看主菜」「这是酒单」">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="primary" id="msGo" ${st.photos.length?"":"disabled"}>✦ 识别菜单</button>
+      <span class="muted" id="msStat" style="font-size:13px">${aiOn ? `最多 8 张；照片会压缩后发送给 AI` : `尚未配置 AI，请先到「AI 探索 → ⚙ 设置」填写密钥`}</span></div>
+  </div>
+  <div id="msOut"></div>`;
+  const keep = () => { st.restaurant = $("#msRest").value.trim(); st.skip = $("#msSkip").checked; };
+  $("#msRest").oninput = keep;
+  $("#msSkip").onchange = () => { keep(); $("#msRest").disabled = st.skip; };
+  if ($("#msFile")) $("#msFile").onchange = async e => {
+    for (const f of [...e.target.files].slice(0, 8 - st.photos.length)) { try { st.photos.push(await shrinkImage(f)); } catch { toast("有一张图片无法读取"); } }
+    keep(); menuPage();
+  };
+  $("#msPhotos").onclick = e => { const i = e.target.dataset.rm; if (i != null){ st.photos.splice(+i, 1); keep(); menuPage(); } };
+  $("#msGo").onclick = async () => {
+    keep();
+    if (!st.skip && !st.restaurant && !confirm("没有填写餐厅。这次不关联餐厅吗？")) return $("#msRest").focus();
+    if (!st.restaurant) st.skip = true;
+    $("#msGo").disabled = true; $("#msStat").textContent = "正在识别菜单并与馆藏比对，约需 20–60 秒…";
+    try {
+      st.result = await api("/api/menu/scan", { method:"POST", timeout: 330e3,
+        body: { images: st.photos.map(p => ({ mime:p.mime, data:p.data })), hint: $("#msHint").value.trim(), provider: cfg.aiProvider || undefined } });
+      st.pick = Object.fromEntries(st.result.dishes.map((d,i) => [i, !d.same]));
+      if (!st.restaurant && st.result.restaurant) { st.restaurant = st.result.restaurant; st.skip = false; }
+      menuPage();
+    } catch(e){ fail(e); $("#msGo").disabled = false; $("#msStat").textContent = ""; }
+  };
+  if (st.result) renderMenuResult(st);
+}
+const dishLinks = (label, xs) => xs.length ? `<div class="md-rel">${label}：${xs.map(x=>`<a href="#/item/${encodeURIComponent(x.id)}" style="${tc(x.type)}"><span class="dot"></span>${esc(x.name)}</a>`).join("")}</div>` : "";
+const dishLine = (d, extra="") => `<div class="md-main"><b>${esc(d.name)}</b>${d.price?`<span class="md-price">${esc(d.price)}</span>`:""}</div>
+  ${d.orig && d.orig!==d.name?`<div class="md-orig">${esc(d.orig)}</div>`:""}${d.note?`<div class="md-note">${esc(d.note)}</div>`:""}${extra}`;
+function renderMenuResult(st){
+  const r = st.result, ds = r.dishes.map((d,i) => [d,i]);
+  const same = ds.filter(([d]) => d.same), fresh = ds.filter(([d]) => !d.same);
+  const hit = ([d]) => { const it = byId(d.same.id);
+    return `<li class="md-row hit"><div class="md-body">${dishLine(d, `${dishLinks("馆藏", [d.same])}${it?`<span class="md-mine">${stars(it.rating)||statusTxt(it.status)}</span>`:""}${d.by==="ai"?`<small class="muted"> · AI 判断</small>`:""}${dishLinks("相关", d.related||[])}`)}</div></li>`; };
+  const nw = ([d,i]) => `<li class="md-row"><label class="cl-check"><input type="checkbox" data-pk="${i}" ${st.pick[i]?"checked":""}><i></i></label><div class="md-body">${dishLine(d, dishLinks("相关", d.related||[]))}</div></li>`;
+  const sections = list => { const g = new Map(); for (const x of list){ const k = x[0].section || "其他"; (g.get(k) || g.set(k,[]).get(k)).push(x); } return [...g]; };
+  const rr = restOf(st);
+  $("#msOut").innerHTML = `<div class="ms-sum muted">${st.skip ? "未关联餐厅" : `餐厅：<b>${esc(st.restaurant)}</b>${rr?"":"（新餐厅，转为藏品时会一并建立）"}`}${r.language?` · ${esc(r.language)}`:""} · 共 ${r.dishes.length} 道 · ${esc(r.model||"")} · ${Math.round(r.ms/1000)} 秒</div>
+    ${r.warning?`<p class="muted" style="font-size:13px">⚠ ${esc(r.warning)}</p>`:""}
+    <section class="collection"><div class="cl-head"><h3>✓ 已收藏 · ${same.length}</h3></div>${same.length?`<ul>${same.map(hit).join("")}</ul>`:`<p class="muted">菜单上没有已收藏的菜。</p>`}</section>
+    <section class="collection"><div class="cl-head"><h3>＋ 新菜 · ${fresh.length}</h3>${fresh.length?`<div class="seg"><button class="sm" id="mdAll">全选</button><button class="sm" id="mdNone">全不选</button></div>`:""}</div>
+      ${sections(fresh).map(([k, xs]) => `<div class="cl-group"><div class="cl-gh"><span>${esc(k)}</span><span class="muted">${xs.length}</span></div><ul>${xs.map(nw).join("")}</ul></div>`).join("") || `<p class="muted">没有新菜。</p>`}
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">${fresh.length?`<button class="primary" id="mdSave">加入草稿箱（<span id="mdN">0</span>）</button>`:""}<button class="ghost" id="mdClear">清空本次结果</button></div></section>`;
+  const count = () => { const n = fresh.filter(([,i]) => st.pick[i]).length; if ($("#mdN")) $("#mdN").textContent = n; return n; };
+  count();
+  $("#msOut").onchange = e => { const i = e.target.dataset.pk; if (i != null){ st.pick[i] = e.target.checked; count(); } };
+  if ($("#mdAll")) { $("#mdAll").onclick = () => { fresh.forEach(([,i]) => st.pick[i] = true); renderMenuResult(st); };
+    $("#mdNone").onclick = () => { fresh.forEach(([,i]) => st.pick[i] = false); renderMenuResult(st); }; }
+  $("#mdClear").onclick = () => { if (confirm("清空本次识别结果和照片？")) { menuScan = null; menuPage(); } };
+  if ($("#mdSave")) $("#mdSave").onclick = async () => {
+    if (!count()) return toast("没有选中的菜");
+    const dishes = fresh.filter(([,i]) => st.pick[i]).map(([d]) => ({ ...d, related: (d.related||[]).map(x => x.id) }));
+    try {
+      const res = await api("/api/drafts", { method:"POST", body: { dishes, restaurantId: restOf(st)?.id || "", restaurantName: st.skip ? "" : st.restaurant } });
+      toast(`已加入草稿箱 ${res.added} 道${res.skipped?`，${res.skipped} 道已在草稿箱中`:""}`);
+      fresh.forEach(([,i]) => st.pick[i] = false); renderMenuResult(st);
+    } catch(e){ fail(e); }
+  };
+}
+
+/* ---------- 草稿箱：整理后批量转为藏品 ---------- */
+const draftGroup = d => `${d.restaurantName || "未关联餐厅"}|${d.date}`;
+async function draftsPage(){
+  if (!isAdmin()) { app.innerHTML = `<div class="empty">只有馆长可以查看草稿箱。</div>`; return; }
+  app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>草稿箱 · Drafts</h2><a class="muted" href="#/menu">扫菜单 →</a></div><div id="dfOut" class="muted">加载中…</div>`;
+  let list;
+  try { list = await api("/api/drafts"); } catch(e){ $("#dfOut").textContent = e.message; return; }
+  const pick = new Set();
+  const draw = () => {
+    const out = $("#dfOut"); if (!out) return;
+    out.className = "";
+    if (!list.length) { out.innerHTML = `<div class="empty">草稿箱是空的。在餐厅扫菜单时，没收藏过的菜会放到这里。</div>`; return; }
+    const g = new Map(); for (const d of list) (g.get(draftGroup(d)) || g.set(draftGroup(d), []).get(draftGroup(d))).push(d);
+    out.innerHTML = `<div class="df-bar"><span class="muted">${list.length} 道待整理 · 已选 <b>${pick.size}</b></span>
+      <button class="sm" id="dfAll">${pick.size===list.length?"全不选":"全选"}</button>
+      <button class="primary sm" id="dfGo" ${pick.size?"":"disabled"}>转为藏品</button><button class="danger sm" id="dfDel" ${pick.size?"":"disabled"}>丢弃</button></div>
+    ${[...g].map(([k, ds]) => { const [rn, date] = k.split("|");
+      return `<section class="collection"><div class="cl-head"><h3>${esc(rn)}</h3><span class="muted">${date} · ${ds.length} 道</span><button class="sm ghost" data-grp="${esc(k)}">选这一组</button></div>
+        <ul>${ds.map(d => `<li class="md-row"><label class="cl-check"><input type="checkbox" data-df="${d.id}" ${pick.has(d.id)?"checked":""}><i></i></label>
+        <div class="md-body"><div class="md-main"><b>${esc(d.name)}</b>${chip(d.type)}${d.section?`<span class="muted" style="font-size:12px">${esc(d.section)}</span>`:""}${d.price?`<span class="md-price">${esc(d.price)}</span>`:""}</div>
+        ${d.orig?`<div class="md-orig">${esc(d.orig)}</div>`:""}${d.note?`<div class="md-note">${esc(d.note)}</div>`:""}
+        ${dishLinks("相关", d.related.map(byId).filter(Boolean))}</div>
+        <button class="sm ghost" data-ed="${d.id}" title="编辑后入藏">✎</button></li>`).join("")}</ul></section>`; }).join("")}`;
+  };
+  draw();
+  const remove = async ids => { await api("/api/drafts/delete", { method:"POST", body:{ ids } }); list = list.filter(d => !ids.includes(d.id)); ids.forEach(i => pick.delete(i)); draw(); };
+  // 餐厅不存在时先建餐厅（同名只建一次）
+  const restCache = {};
+  const ensureRest = async d => {
+    if (d.restaurantId && byId(d.restaurantId)) return d.restaurantId;
+    if (!d.restaurantName) return "";
+    const found = restaurants().find(r => r.name === d.restaurantName); if (found) return found.id;
+    if (restCache[d.restaurantName]) return restCache[d.restaurantName];
+    const r = upsert(await api("/api/items", { method:"POST", body:{ type:"restaurant", name:d.restaurantName, tags:[] } }));
+    return restCache[d.restaurantName] = r.id;
+  };
+  const toItem = (d, rid) => ({ type: d.type, name: d.name, alt: d.orig, summary: d.note, tags: d.tags, status: "tried",
+    health: { ingredients: d.ingredients }, region: rid ? (byId(rid)?.region || "") : "",
+    source: `菜单扫描 · ${d.restaurantName || "未关联餐厅"} · ${d.date}${d.price ? ` · ${d.price}` : ""}`,
+    relations: [...(rid ? [{ to: rid, label: MEMBER_LABEL }] : []), ...d.related.filter(byId).map(to => ({ to, label: "相关" }))] });
+  $("#dfOut").onchange = e => { const id = e.target.dataset.df; if (id){ e.target.checked ? pick.add(id) : pick.delete(id); draw(); } };
+  $("#dfOut").onclick = async e => {
+    const t = e.target.closest("button"); if (!t) return;
+    if (t.id === "dfAll") { pick.size === list.length ? pick.clear() : list.forEach(d => pick.add(d.id)); draw(); }
+    else if (t.dataset.grp) { list.filter(d => draftGroup(d) === t.dataset.grp).forEach(d => pick.add(d.id)); draw(); }
+    else if (t.id === "dfDel") { if (confirm(`丢弃选中的 ${pick.size} 道草稿？`)) remove([...pick]).catch(fail); }
+    else if (t.id === "dfGo") {
+      if (!confirm(`把选中的 ${pick.size} 道转为藏品？\n它们会标记为「已品尝」，并关联到所在餐厅。`)) return;
+      t.disabled = true; const done = [];
+      try { for (const d of list.filter(x => pick.has(x.id))) { const rid = await ensureRest(d); upsert(await api("/api/items", { method:"POST", body: toItem(d, rid) })); done.push(d.id); } }
+      catch(err){ fail(err); }
+      if (done.length) { toast(`已入藏 ${done.length} 道`); await remove(done).catch(fail); }
+    }
+    else if (t.dataset.ed) {
+      const d = list.find(x => x.id === t.dataset.ed);
+      try { const rid = await ensureRest(d); editor(null, toItem(d, rid));
+        editorHook = () => api("/api/drafts/delete", { method:"POST", body:{ ids:[d.id] } }).catch(() => {}); }
+      catch(err){ fail(err); }
+    }
+  };
 }
 
 /* ---------- 品味统计（供 AI 推荐使用） ---------- */

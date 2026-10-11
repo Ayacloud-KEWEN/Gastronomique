@@ -14,6 +14,7 @@ import * as auth from "./auth.js";
 import { makeThumb, backfillThumbs } from "./thumbs.js";
 import * as ai from "./ai.js";
 import { extract } from "./docs.js";
+import * as menu from "./menu.js";
 import { MEDIA_DIR, listItems, getItem, saveItem, deleteItem, mergeItems, slug, cleanupOrphans } from "./items.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -258,10 +259,10 @@ app.post("/api/ai/organize", { bodyLimit: 2 * 1024 * 1024 }, async req => {
   } else Object.assign(opts, req.body || {});
   const doc = await extract({ ...(file || {}), url: opts.url, text: opts.text });
   const provider = await ai.resolveProvider(opts.provider);
-  const canSee = provider === "claude";
+  const imgs = doc.images.filter(a => ai.canSee(provider, a.kind || "image")), canSee = imgs.length > 0;
   const existing = (await q("SELECT name, alt FROM items ORDER BY name")).rows.map(r => r.alt ? `${r.name}（${r.alt}）` : r.name).join("、");
   const prompt = `资料来源：${doc.source}${doc.truncated ? "（过长，已截断）" : ""}
-${opts.hint ? `整理要求：${opts.hint}\n` : ""}${canSee && doc.images.length ? `附带 ${doc.images.length} 份原件/图片，请一并阅读（正文中的 [图片N] 对应第 N 张）。\n` : ""}
+${opts.hint ? `整理要求：${opts.hint}\n` : ""}${canSee ? `附带 ${imgs.length} 份原件/图片，请一并阅读（正文中的 [图片N] 对应第 N 张）。\n` : ""}
 已有藏品（避免重复；同一事物请在 existing 标注）：${existing}
 
 按以下 JSON 结构输出：
@@ -271,14 +272,21 @@ ${ORGANIZE_SCHEMA}
 ${doc.text}`;
   const t0 = Date.now();
   const r = await ai.complete({ provider, system: ORGANIZE_SYS, prompt, maxTokens: 16000, timeoutMs: 300e3,
-    attachments: canSee ? doc.images : [] });
+    attachments: imgs });
   let data;
   try { data = parseJsonLoose(r.text); }
   catch { throw Object.assign(new Error("AI 返回的内容无法解析，请重试或缩短资料"), { statusCode: 502, expose: true }); }
-  return { source: doc.source, chars: doc.chars, truncated: doc.truncated, images: doc.images.length, imagesUsed: canSee ? doc.images.length : 0,
+  return { source: doc.source, chars: doc.chars, truncated: doc.truncated, images: doc.images.length, imagesUsed: imgs.length,
     provider: r.provider, model: r.model, ms: Date.now() - t0,
     items: Array.isArray(data.items) ? data.items : [], relations: Array.isArray(data.relations) ? data.relations : [], notes: data.notes || "" };
 });
+
+/* ---------- 菜单扫描与草稿箱 ---------- */
+// 照片由前端压缩为 JPEG（约 1600px），最多 8 张
+app.post("/api/menu/scan", { bodyLimit: 40 * 1024 * 1024 }, async req => menu.scanMenu(req.body || {}));
+app.get("/api/drafts", () => menu.listDrafts());
+app.post("/api/drafts", async req => menu.addDrafts(req.body || {}));
+app.post("/api/drafts/delete", async req => menu.deleteDrafts(req.body?.ids));
 
 /* ---------- 版本号与 Service Worker（离线缓存） ---------- */
 // 版本 = 前端文件内容的哈希；文件变化即视为新版本
