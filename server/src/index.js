@@ -15,6 +15,7 @@ import { makeThumb, backfillThumbs } from "./thumbs.js";
 import * as ai from "./ai.js";
 import { extract } from "./docs.js";
 import * as menu from "./menu.js";
+import { SUBTYPES, SUBTYPE_KEYS, autoClassify } from "./subtypes.js";
 import { MEDIA_DIR, listItems, getItem, saveItem, deleteItem, mergeItems, slug, cleanupOrphans } from "./items.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -100,9 +101,12 @@ app.put("/api/items/:id", async (req, reply) => {
 });
 // 只改个人体验（状态/评分），不必提交整件藏品
 app.patch("/api/items/:id", async (req, reply) => {
-  const { status, rating } = req.body || {};
-  const r = await q(`UPDATE items SET status=COALESCE($2,status), rating=COALESCE($3,rating), updated_at=now() WHERE id=$1`,
-    [req.params.id, ["", "tried", "want"].includes(status) ? status : null, rating == null ? null : Math.max(0, Math.min(5, +rating | 0))]);
+  const { status, rating, subtype, confirmSubtype } = req.body || {};
+  // 小类：改动或确认后记为人工（manual），自动归类不会再覆盖
+  const st = subtype !== undefined && (subtype === "" || SUBTYPE_KEYS.includes(subtype)) ? subtype : null;
+  const r = await q(`UPDATE items SET status=COALESCE($2,status), rating=COALESCE($3,rating), subtype=COALESCE($4,subtype),
+      subtype_src=CASE WHEN $4 IS NOT NULL OR $5 THEN (CASE WHEN COALESCE($4,subtype)='' THEN '' ELSE 'manual' END) ELSE subtype_src END, updated_at=now() WHERE id=$1`,
+    [req.params.id, ["", "tried", "want"].includes(status) ? status : null, rating == null ? null : Math.max(0, Math.min(5, +rating | 0)), st, !!confirmSubtype]);
   return r.rowCount ? getItem(req.params.id) : reply.code(404).send({ error: "找不到" });
 });
 app.delete("/api/items/:id", async req => { await deleteItem(req.params.id); return { ok: true }; });
@@ -281,6 +285,10 @@ ${doc.text}`;
     items: Array.isArray(data.items) ? data.items : [], relations: Array.isArray(data.relations) ? data.relations : [], notes: data.notes || "" };
 });
 
+/* ---------- 食材小类 ---------- */
+app.get("/api/subtypes", () => SUBTYPES);
+app.post("/api/subtypes/auto", async req => autoClassify({ useAI: req.body?.ai !== false, provider: req.body?.provider }));
+
 /* ---------- 菜单扫描与草稿箱 ---------- */
 // 照片由前端压缩为 JPEG（约 1600px），最多 8 张
 app.post("/api/menu/scan", { bodyLimit: 40 * 1024 * 1024 }, async req => menu.scanMenu(req.body || {}));
@@ -318,6 +326,9 @@ async function seedIfEmpty() {
 }
 
 await migrate(app.log);
+// 还没归类的食材（如刚升级、刚导入）在启动时按规则先分一次，不调用 AI
+if ((await q("SELECT 1 FROM items WHERE type='ingredient' AND subtype_src='' LIMIT 1")).rowCount)
+  autoClassify({ useAI: false }).then(r => app.log.info(`食材小类：规则归类 ${r.rule} 件`)).catch(e => app.log.warn(e.message));
 await auth.ensureAdmin(app.log);
 await seedIfEmpty();
 await cleanupOrphans();

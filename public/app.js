@@ -94,6 +94,19 @@ function neighbors(id){
 /* ---------- ui helpers ---------- */
 function toast(m){ const t=$("#toast"); t.textContent=m; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"),2200); }
 const chip = t => `<span class="chip t" style="${tc(t)}">${TYPES[t]?.zh||t}</span>`;
+// 食材小类（与服务器 subtypes.js 一致）
+const SUBTYPES = { fish:"鱼类", shellfish:"贝类与软体", crustacean:"虾蟹", seaother:"其他海产", roe:"鱼子酱与鱼卵", preserved:"水产罐头与加工",
+  meat:"肉类", cured:"火腿与腌制肉", dairy:"奶酪与乳制品", fungi:"蘑菇与菌类", produce:"蔬果与香草", grain:"谷物、面与豆",
+  condiment:"调味品与酱料", sweet:"甜点与零食", other:"其他" };
+const chipIt = it => it.type==="ingredient" && SUBTYPES[it.subtype] ? `<span class="chip t" style="${tc(it.type)}">${TYPES.ingredient.zh} · ${SUBTYPES[it.subtype]}</span>` : chip(it.type);
+// 标签云：按使用次数排序，默认只显示前 n 个（当前选中的始终显示），其余收进「查看全部」
+function tagCloud(items, active, open, n = 18){
+  const cnt = {}; for (const i of items) for (const t of i.tags||[]) cnt[t] = (cnt[t]||0) + 1;
+  const all = Object.keys(cnt).sort((a,b) => cnt[b]-cnt[a] || PY_COLLATOR.compare(a,b));
+  const show = open ? all : [...new Set([...all.slice(0, n), ...(active ? [active] : [])])];
+  return show.map(t => `<span class="tag" data-tag="${esc(t)}" style="${t===active?"background:var(--accent);color:#fff":""}">#${esc(t)}<small> ${cnt[t]}</small></span>`).join("")
+    + (all.length > n ? `<button type="button" class="sm ghost tag-more" data-more="1">${open ? "收起 ▴" : `查看全部 ${all.length} 个标签 ▾`}</button>` : "");
+}
 const stars = n => n ? `<span class="stars">${"★".repeat(n)}${"☆".repeat(5-n)}</span>` : "";
 const statusTxt = s => s==="tried" ? `<span class="status tried">● 已品尝</span>` : s==="want" ? `<span class="status want">○ 想尝</span>` : "";
 // 专题：被 ≥3 件藏品以「出现于」指向的藏品（收藏指南、图鉴海报等）
@@ -112,7 +125,7 @@ function card(it){
   const c = cover(it);
   return `<article class="card has-cover${inCmp(it.id)?" picked":""}" data-go="${esc(it.id)}">
     <div class="cover${c?"":" ph"}" style="${tc(it.type)}">${c?mediaEl(c,"",true):`<span>${esc([...(it.name||"·")][0])}</span>`}</div>
-    ${chip(it.type)}
+    ${chipIt(it)}
     <h3>${esc(it.name)}</h3>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
     <p>${esc(it.summary)}</p>
     <div class="foot"><span>${esc(it.region||"")}</span><span>${stars(it.rating)||statusTxt(it.status)}</span></div>
@@ -193,7 +206,7 @@ function route(){
   $("#moreSheet").hidden = true;
   G.current = { r, params, id: parts[1] && decodeURIComponent(parts[1]) };
   clearAppClick();
-  ({home, discover, atlas, stories, graph, ai, item, map: mapView, compare, catalog, dupes, menu: menuPage, drafts: draftsPage, glossary: glossaryPage}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
+  ({home, discover, atlas, stories, graph, ai, item, map: mapView, compare, catalog, dupes, menu: menuPage, drafts: draftsPage, glossary: glossaryPage, subtypes: subtypesPage}[r] || home)(params, parts[1] && decodeURIComponent(parts[1]));
   updateCmpBar();
   $("#shareBtn").hidden = r==="ai";
   if (r!=="graph") window.scrollTo(0,0);
@@ -248,7 +261,7 @@ function home(){
 
 const PAGE = 36;
 function discover(params){
-  const st = { q: params.get("q")||"", type: params.get("type")||"", tag: params.get("tag")||"", sort: "updated" };
+  const st = { q: params.get("q")||"", type: params.get("type")||"", sub: params.get("sub")||"", tag: params.get("tag")||"", sort: "updated", tagsOpen: false };
   app.innerHTML = `
   <div class="section-h" style="margin-top:0"><h2>图鉴 · Discover</h2><span class="muted" id="cnt"></span></div>
   <div class="filters">
@@ -257,12 +270,13 @@ function discover(params){
     <select id="fs"><option value="updated">最近更新</option><option value="name">名称</option><option value="rating">评分</option><option value="region">地区</option></select>
   </div>
   <div class="seg" id="ft" style="margin-bottom:12px"><button data-t="">全部</button>${Object.entries(TYPES).map(([k,v])=>`<button data-t="${k}">${v.zh}</button>`).join("")}</div>
+  <div class="seg sub-seg" id="fsub" hidden></div>
   <div class="tags" id="ftag" style="margin-bottom:20px"></div>
   <div id="res"></div>`;
   const allTags = [...new Set(db.items.flatMap(i=>i.tags||[]))].sort();
   const draw = () => {
     const q = st.q.toLowerCase();
-    let list = db.items.filter(i => (!st.type || i.type===st.type) && (!st.tag || (i.tags||[]).includes(st.tag)) &&
+    let list = db.items.filter(i => (!st.type || i.type===st.type) && (!st.sub || st.type==="ingredient" && (i.subtype||"none")===st.sub) && (!st.tag || (i.tags||[]).includes(st.tag)) &&
       (!q || [i.name,i.alt,i.region,i.summary,i.body,i.story,(i.tags||[]).join(" ")].join(" ").toLowerCase().includes(q)));
     const s = { updated:(a,b)=>(b.updated||"").localeCompare(a.updated||""), name:(a,b)=>a.name.localeCompare(b.name,"zh"), rating:(a,b)=>(b.rating||0)-(a.rating||0), region:(a,b)=>(a.region||"").localeCompare(b.region||"","zh") }[st.sort];
     list.sort(s);
@@ -280,15 +294,23 @@ function discover(params){
       st.io.observe($("#moreBtn")); }
     $("#cnt").textContent = `${list.length} 件藏品`;
     document.querySelectorAll("#ft button").forEach(b => b.classList.toggle("on", b.dataset.t===st.type));
-    $("#ftag").innerHTML = allTags.map(t=>`<span class="tag" data-tag="${esc(t)}" style="${t===st.tag?"background:var(--accent);color:#fff":""}">#${esc(t)}</span>`).join("");
+    // 食材小类：选了「食材」才出现
+    const ing = db.items.filter(i => i.type==="ingredient"), subN = k => ing.filter(i => (i.subtype||"none")===k).length;
+    $("#fsub").hidden = st.type !== "ingredient";
+    if (st.type === "ingredient") $("#fsub").innerHTML = `<button class="sm ${!st.sub?"on":""}" data-sub="">全部食材 · ${ing.length}</button>`
+      + [...Object.keys(SUBTYPES), "none"].filter(subN).map(k => `<button class="sm ${st.sub===k?"on":""}" data-sub="${k}">${k==="none"?"未分类":SUBTYPES[k]} · ${subN(k)}</button>`).join("")
+      + (isAdmin() ? `<a class="muted" href="#/subtypes" style="align-self:center;margin-left:6px;font-size:12px">整理小类 →</a>` : "");
+    $("#ftag").innerHTML = tagCloud(st.type ? db.items.filter(i => i.type===st.type) : db.items, st.tag, st.tagsOpen);
   };
   $("#fq").oninput = e => { st.q = e.target.value; draw(); };
   const setPick = on => { app.dataset.pick = on ? "1" : ""; $("#pickBtn").classList.toggle("on", on); $("#pickBtn").textContent = on ? "✓ 完成选择" : "⚖ 选择对比"; };
   setPick(false);
   $("#pickBtn").onclick = () => setPick(!app.dataset.pick);
   $("#fs").onchange = e => { st.sort = e.target.value; draw(); };
-  $("#ft").onclick = e => { const b=e.target.closest("button"); if(b){ st.type=b.dataset.t; draw(); } };
-  $("#ftag").onclick = e => { const t=e.target.dataset.tag; if(t!=null){ st.tag = st.tag===t?"":t; draw(); } };
+  $("#ft").onclick = e => { const b=e.target.closest("button"); if(b){ st.type=b.dataset.t; st.sub=""; draw(); } };
+  $("#fsub").onclick = e => { const b=e.target.closest("[data-sub]"); if(b){ st.sub=b.dataset.sub; draw(); } };
+  $("#ftag").onclick = e => { if (e.target.closest("[data-more]")) { st.tagsOpen = !st.tagsOpen; return draw(); }
+    const t=e.target.closest("[data-tag]")?.dataset.tag; if(t!=null){ st.tag = st.tag===t?"":t; draw(); } };
   draw();
 }
 
@@ -380,7 +402,7 @@ function item(_, id){
   app.innerHTML = `
   <div class="detail">
     <div>
-      <div style="display:flex;gap:10px;align-items:center">${chip(it.type)}<span class="eyebrow">${esc(it.region)}</span>${it._pending?`<span class="chip" style="color:var(--gold);border-color:var(--gold)">待同步</span>`:""}</div>
+      <div style="display:flex;gap:10px;align-items:center">${chipIt(it)}<span class="eyebrow">${esc(it.region)}</span>${it._pending?`<span class="chip" style="color:var(--gold);border-color:var(--gold)">待同步</span>`:""}</div>
       <h1>${esc(it.name)}</h1>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
       ${cover(it) && !(it.body||"").includes("m:"+cover(it).id) ? `<figure class="lead">${mediaEl(cover(it))}${cover(it).caption?`<figcaption>${esc(cover(it).caption)}</figcaption>`:""}</figure>` : ""}
       <p class="prose" style="font-size:18px;margin-top:18px">${esc(it.summary)}</p>
@@ -492,6 +514,7 @@ function editor(it, preset={}, focus=""){
   <div class="ed-head"><button class="ghost ed-icon" id="ecancel" type="button" aria-label="取消" title="取消"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg><span>取消</span></button><h2>${isNew?"新藏品":"编辑藏品"}</h2><button class="primary ed-icon" id="esave" type="button" aria-label="保存" title="保存"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>保存</span></button></div>
   <form id="ef" class="ed" autocomplete="off">
     <div class="typechips">${Object.entries(TYPES).map(([k,v])=>`<button type="button" data-type="${k}" class="${d.type===k?"on":""}" style="${tc(k)}">${v.zh}</button>`).join("")}</div>
+    <label class="subtype-row" ${d.type==="ingredient"?"":"hidden"}>食材小类<select name="subtype"><option value="">— 自动判断 —</option>${Object.entries(SUBTYPES).map(([k,v])=>`<option value="${k}" ${d.subtype===k?"selected":""}>${v}</option>`).join("")}</select></label>
     ${sec("基本信息", true, `
       <label>名称 *<input name="name" required value="${esc(d.name)}" placeholder="如：金华火腿" enterkeyhint="next"></label>
       <label>原名 / 外文名<input name="alt" value="${esc(d.alt)}" lang="en" autocapitalize="words"></label>
@@ -555,7 +578,9 @@ function editor(it, preset={}, focus=""){
       health: { ingredients: chipValues(form.querySelector('[data-name="ingredients"]')), levels,
         tags: [...form.querySelectorAll("#hTags .on")].map(b => b.textContent), kcal: +f.get("kcal") || undefined, portion: f.get("portion") || undefined, note: f.get("hnote").trim() || undefined },
       relations:[...$("#rels").children].map(r=>({to:$(".rt",r).value,label:$(".rl",r).value.trim()||"相关"})).filter(r=>r.to),
-      media: d.media, geo: getGeo() };
+      media: d.media, geo: getGeo(),
+      // 小类：手动选了就记为人工；留「自动判断」由服务器按规则归类
+      subtype: f.get("subtype") || "", subtypeSrc: f.get("subtype") ? (f.get("subtype") === d.subtype ? d.subtypeSrc || "manual" : "manual") : "" };
   };
   let draftT; const saveDraft = () => { if (!isNew) return; clearTimeout(draftT); draftT = setTimeout(() => { try { localStorage.setItem(DRAFT, JSON.stringify(collect())); } catch {} }, 400); };
   form.addEventListener("input", saveDraft); form.addEventListener("click", saveDraft);
@@ -569,7 +594,7 @@ function editor(it, preset={}, focus=""){
   form.onclick = e => {
     const b = e.target.closest("button"); if (!b || !form.contains(b)) return;
     const p = b.parentElement;
-    if (b.dataset.type){ p.querySelectorAll("button").forEach(x => x.classList.toggle("on", x===b)); }
+    if (b.dataset.type){ p.querySelectorAll("button").forEach(x => x.classList.toggle("on", x===b)); form.querySelector(".subtype-row").hidden = b.dataset.type !== "ingredient"; }
     else if (p.id === "edStatus"){ d.status = b.dataset.s; p.querySelectorAll("button").forEach(x => x.classList.toggle("on", x===b)); }
     else if (p.id === "edRate"){ const r = +b.dataset.r; d.rating = d.rating===r ? 0 : r;
       if (d.rating && !d.status){ d.status = "tried"; $("#edStatus").querySelectorAll("button").forEach(x => x.classList.toggle("on", x.dataset.s==="tried")); }
@@ -804,7 +829,7 @@ function graph(params){
     const box = $("#ginfo"); if (!n){ box.hidden = true; return; }
     const it = n.it, nb = neighbors(it.id), ms = colIds.has(it.id) ? membersOf(it.id) : [];
     box.hidden = false;
-    box.innerHTML = `<button class="sm ghost gi-x" aria-label="关闭">×</button>${chip(it.type)}<h3>${esc(it.name)}</h3>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
+    box.innerHTML = `<button class="sm ghost gi-x" aria-label="关闭">×</button>${chipIt(it)}<h3>${esc(it.name)}</h3>${it.alt?`<div class="alt">${esc(it.alt)}</div>`:""}
       ${it.summary?`<p>${esc(it.summary)}</p>`:""}
       <div class="gi-act"><a class="primary sm btn" href="#/item/${encodeURIComponent(it.id)}">打开藏品</a>${it.id!==focusId?`<a class="sm btn" href="${focusUrl(it.id)}">聚焦此处</a>`:""}</div>
       ${ms.length?`<div class="eyebrow">专题成员 · ${ms.length}</div>`:""}
@@ -1095,6 +1120,52 @@ function glossaryPage(params){
   };
   $("#gsq").oninput = e => draw(e.target.value);
   draw(q);
+}
+
+/* ---------- 整理食材小类：自动归类的结果逐条确认或修改 ---------- */
+function subtypesPage(params){
+  if (!isAdmin()) { app.innerHTML = `<div class="empty">只有馆长可以整理小类。</div>`; return; }
+  const view = params?.get("v") || "todo";
+  const ing = () => db.items.filter(i => i.type === "ingredient");
+  const SRC = { auto: "规则", ai: "AI", manual: "已确认", "": "未分类" };
+  const draw = () => {
+    const all = ing(), todo = all.filter(i => i.subtypeSrc !== "manual");
+    const list = view === "all" ? all : todo;
+    const vs = [["todo", `待确认 · ${todo.length}`], ["all", `全部食材 · ${all.length}`]];
+    const groups = [...Object.keys(SUBTYPES), ""].map(k => [k, list.filter(i => (i.subtype||"") === k)]).filter(([,x]) => x.length);
+    app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>整理食材小类</h2><a class="muted" href="#/discover?type=ingredient">图鉴 →</a></div>
+      <div class="df-bar"><div class="seg">${vs.map(([k,v]) => `<button class="sm ${k===view?"on":""}" data-v="${k}">${v}</button>`).join("")}</div>
+        <button class="sm" id="stAuto" title="对所有未人工确认的食材重新归类">✦ 重新自动归类</button></div>
+      <p class="muted" style="font-size:13px;margin:4px 0 12px">自动归类先按名称、外文名和标签判断，分不出来的再交给 AI。逐条修改即记为「已确认」；确认无误的整组可以一键确认。已确认的不会被重新归类覆盖。</p>
+      ${groups.length ? groups.map(([k, xs]) => `<section class="collection"><div class="cl-head"><h3>${k ? SUBTYPES[k] : "未分类"}</h3><span class="muted">${xs.length}</span>
+        ${view==="todo" && k ? `<button class="sm" data-okgrp="${k}">✓ 这一组都对</button>` : ""}</div><ul>${xs.sort((a,b) => (a.subtypeSrc==="ai") - (b.subtypeSrc==="ai") || PY_COLLATOR.compare(a.name, b.name)).map(i => `<li class="md-row">
+        <div class="md-body"><div class="md-main"><a href="#/item/${encodeURIComponent(i.id)}" style="color:inherit"><b>${esc(i.name)}</b></a>${i.alt?`<span class="md-orig" style="font-size:13px">${esc(i.alt)}</span>`:""}<span class="md-price">${SRC[i.subtypeSrc||""]}</span></div>
+        ${(i.tags||[]).length?`<div class="md-note">${i.tags.slice(0,5).map(t=>"#"+esc(t)).join(" ")}</div>`:""}</div>
+        <select data-st="${esc(i.id)}"><option value="">未分类</option>${Object.entries(SUBTYPES).map(([sk,sv]) => `<option value="${sk}" ${i.subtype===sk?"selected":""}>${sv}</option>`).join("")}</select>
+        ${i.subtypeSrc !== "manual" && i.subtype ? `<button class="sm ghost" data-ok="${esc(i.id)}" title="确认">✓</button>` : ""}</li>`).join("")}</ul></section>`).join("")
+      : `<div class="empty">${view==="todo" ? "没有待确认的食材，都整理好了。" : "还没有食材。"}</div>`}`;
+  };
+  const patch = (id, body) => api("/api/items/"+encodeURIComponent(id), { method:"PATCH", body }).then(upsert);
+  app.onchange = async e => { const id = e.target.dataset.st; if (!id) return;
+    try { await patch(id, { subtype: e.target.value }); toast(`已改为「${SUBTYPES[e.target.value] || "未分类"}」`); draw(); } catch(err){ fail(err); } };
+  app.onclick = async e => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.v) location.hash = `#/subtypes?v=${b.dataset.v}`;
+    else if (b.dataset.ok) { try { await patch(b.dataset.ok, { confirmSubtype: true }); draw(); } catch(err){ fail(err); } }
+    else if (b.dataset.okgrp) {
+      const xs = ing().filter(i => i.subtypeSrc !== "manual" && i.subtype === b.dataset.okgrp);
+      if (!confirm(`确认「${SUBTYPES[b.dataset.okgrp]}」这一组的 ${xs.length} 件都分对了？`)) return;
+      b.disabled = true; try { for (const i of xs) await patch(i.id, { confirmSubtype: true }); toast(`已确认 ${xs.length} 件`); draw(); } catch(err){ fail(err); }
+    }
+    else if (b.id === "stAuto") {
+      if (!confirm("对所有未确认的食材重新自动归类？\n先按规则，分不出的交给 AI；已确认的不受影响。")) return;
+      b.disabled = true; b.textContent = "正在归类…";
+      try { const r = await api("/api/subtypes/auto", { method:"POST", timeout: 330e3, body: { provider: cfg.aiProvider || undefined } });
+        await reload(); toast(`规则归类 ${r.rule} 件，AI 归类 ${r.ai} 件${r.left ? `，仍有 ${r.left} 件未分类` : ""}`); if (r.warning) alert(r.warning); draw(); }
+      catch(err){ fail(err); b.disabled = false; }
+    }
+  };
+  draw();
 }
 
 /* ---------- 品味统计（供 AI 推荐使用） ---------- */
@@ -1528,7 +1599,7 @@ function initialOf(s){
 
 /* ---------- 馆藏目录 ---------- */
 function catalog(params){
-  const st = { by: params.get("by") || cfg.catBy || "region", q: params.get("q") || "", tag: params.get("tag") || "", status: "" };
+  const st = { by: params.get("by") || cfg.catBy || "region", q: params.get("q") || "", tag: params.get("tag") || "", status: "", tagsOpen: false };
   app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>馆藏目录 · Index</h2><span class="muted" id="ctCount"></span></div>
     <div class="filters"><input id="ctQ" placeholder="在目录中查找：名称、原名、地区、标签…" value="${esc(st.q)}" type="search">
       <div class="seg" id="ctSt">${[["","全部"],["tried","已品尝"],["want","想尝"]].map(([k,v])=>`<button class="sm ${k===st.status?"on":""}" data-s="${k}">${v}</button>`).join("")}</div></div>
@@ -1551,7 +1622,7 @@ function catalog(params){
     const list = db.items.filter(i => (!st.status || i.status===st.status) && (!st.tag || (i.tags||[]).includes(st.tag)) &&
       (!q || [i.name, i.alt, i.region, countryName(countryOf(i)), (i.tags||[]).join(" "), i.summary].join(" ").toLowerCase().includes(q)));
     $("#ctCount").textContent = `${list.length} / ${db.items.length} 件`;
-    $("#ctTags").innerHTML = allTags.map(t => `<span class="tag" data-tag="${esc(t)}" style="${t===st.tag?"background:var(--accent);color:#fff":""}">#${esc(t)}</span>`).join("");
+    $("#ctTags").innerHTML = tagCloud(db.items, st.tag, st.tagsOpen);
     const expand = !!q || !!st.tag || list.length <= 40;
     let html = "", letters = [];
     const guessed = db.items.filter(i => !i.country && inferCountry(i.region)).length;
@@ -1579,7 +1650,13 @@ function catalog(params){
       html = letters.map(L => `<div class="az-sec" id="az-${L}"><div class="az-h">${L}</div>${by[L].sort(byPinyin).map(row).join("")}</div>`).join("");
     } else if (st.by === "type"){
       html = Object.entries(TYPES).map(([k,v]) => { const l = list.filter(i => i.type===k).sort(byPinyin);
-        return l.length ? group(k, `<span class="dot" style="${tc(k)};display:inline-block;margin-right:8px"></span>${v.zh}`, l, expand) : ""; }).join("");
+        if (!l.length) return "";
+        const title = `<span class="dot" style="${tc(k)};display:inline-block;margin-right:8px"></span>${v.zh}`;
+        if (k !== "ingredient") return group(k, title, l, expand);
+        // 食材按小类再分组
+        const subs = [...Object.keys(SUBTYPES), ""].map(s => [s, l.filter(i => (i.subtype||"")===s)]).filter(([,x]) => x.length);
+        return `<details class="ct-group" ${expand?"open":""} id="g-${k}"><summary><span>${title}</span><b>${l.length}</b></summary>${subs.map(([s,x]) => `<div class="ct-sub">${s ? SUBTYPES[s] : "未分类"} <span>${x.length}</span></div>${x.map(row).join("")}`).join("")}</details>`;
+      }).join("");
     } else {
       const by = new Map();
       for (const it of [...list].sort((a,b) => (b.created||"").localeCompare(a.created||""))) { const m = (it.created||"").slice(0,7); by.set(m, [...(by.get(m)||[]), it]); }
@@ -1604,7 +1681,8 @@ function catalog(params){
   $("#ctQ").oninput = e => { st.q = e.target.value; draw(); };
   $("#ctSt").onclick = e => { const b = e.target.closest("button"); if (!b) return; st.status = b.dataset.s; $("#ctSt").querySelectorAll("button").forEach(x => x.classList.toggle("on", x===b)); draw(); };
   $("#ctBy").onclick = e => { const b = e.target.closest("button"); if (!b) return; st.by = cfg.catBy = b.dataset.by; saveCfg(); $("#ctBy").querySelectorAll("button").forEach(x => x.classList.toggle("on", x===b)); draw(); };
-  $("#ctTags").onclick = e => { const t = e.target.dataset.tag; if (t == null) return; st.tag = st.tag===t ? "" : t; draw(); };
+  $("#ctTags").onclick = e => { if (e.target.closest("[data-more]")) { st.tagsOpen = !st.tagsOpen; return draw(); }
+    const t = e.target.closest("[data-tag]")?.dataset.tag; if (t == null) return; st.tag = st.tag===t ? "" : t; draw(); };
   $("#azRail").onclick = e => { const L = e.target.dataset.az; if (L) document.getElementById("az-"+L)?.scrollIntoView({ behavior:"smooth", block:"start" }); };
   draw();
 }
@@ -1679,7 +1757,7 @@ async function dupes(){
   };
 }
 // 路由切换时清掉 dupes 页挂在 #app 上的点击处理
-const clearAppClick = () => { app.onclick = null; };
+const clearAppClick = () => { app.onclick = null; app.onchange = null; };
 
 /* ---------- AI 整理文档 ---------- */
 function organizePanel(){

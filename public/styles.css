@@ -585,3 +585,11 @@ a.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .term-chip{display:inline-block;font-size:11px;padding:0 7px;border:1px solid var(--gold);color:var(--gold);border-radius:999px;font-style:italic;text-decoration:none;line-height:18px}
 .term-chip.known{background:color-mix(in srgb,var(--gold) 14%,transparent)}
 .ms-arch{margin:0 0 10px}
+
+/* ---------- 食材小类与标签折叠 ---------- */
+.sub-seg{margin:-4px 0 12px;padding-left:10px;border-left:2px solid var(--line)}
+.subtype-row{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted);margin:10px 0 2px}
+.subtype-row select{border:1px solid var(--line);background:var(--bg);border-radius:4px;padding:8px 10px;font-size:14px;color:var(--ink)}
+.tag small{opacity:.55;font-size:10px}
+.tag-more{font-size:12px;padding:2px 10px;border-style:dashed}
+.md-row select{flex:none;align-self:center;border:1px solid var(--line);background:var(--bg);border-radius:4px;padding:4px 6px;font-size:13px;color:var(--ink);max-width:9.5em}

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { q, tx } from "./db.js";
+import { SUBTYPE_KEYS, SUBTYPE_SRC, guessSubtype } from "./subtypes.js";
 
 export const MEDIA_DIR = path.resolve(process.env.MEDIA_DIR || "./data/media");
 const TYPES = ["ingredient","dish","cuisine","beverage","restaurant","producer","region","culture","event","story"];
@@ -18,7 +19,7 @@ SELECT i.*,
 FROM items i`;
 const shape = r => ({
   id:r.id, type:r.type, name:r.name, alt:r.alt, region:r.region, country:r.country, tags:r.tags, status:r.status, rating:r.rating,
-  flavor:r.flavor, health:r.health, geo:r.geo, summary:r.summary, body:r.body, story:r.story, source:r.source,
+  flavor:r.flavor, health:r.health, geo:r.geo, summary:r.summary, body:r.body, story:r.story, source:r.source, subtype:r.subtype, subtypeSrc:r.subtype_src,
   created:r.created_at.toISOString(), updated:r.updated_at.toISOString(),
   relations:r.relations, journal:r.journal, media:r.media,
 });
@@ -57,6 +58,10 @@ export function clean(d) {
     flavor, summary: str(d.summary, 1000), body: str(d.body, 100000), story: str(d.story, 20000), source: str(d.source, 1000),
     relations: (Array.isArray(d.relations) ? d.relations : []).filter(r => r?.to).map(r => ({ to: str(r.to, 100), label: str(r.label, 50) || "相关" })),
     media: (Array.isArray(d.media) ? d.media : []).filter(m => m?.id),
+    // 小类只对食材有效；没给小类的食材按规则自动归类
+    ...(() => { if (d.type !== "ingredient") return { subtype: "", subtypeSrc: "" };
+      if (SUBTYPE_KEYS.includes(d.subtype)) return { subtype: d.subtype, subtypeSrc: SUBTYPE_SRC.includes(d.subtypeSrc) && d.subtypeSrc ? d.subtypeSrc : "manual" };
+      const g = guessSubtype({ name, alt: d.alt, tags: d.tags }); return { subtype: g, subtypeSrc: g ? "auto" : "" }; })(),
   };
 }
 
@@ -67,11 +72,11 @@ export async function saveItem(id, raw, { created } = {}) {
   const d = clean(raw);
   const removedFiles = await tx(async c => {
     await c.query(`
-      INSERT INTO items(id,type,name,alt,region,tags,status,rating,flavor,summary,body,story,source,created_at,updated_at,health,geo,country)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14::timestamptz,now()),now(),$15,$16,$17)
+      INSERT INTO items(id,type,name,alt,region,tags,status,rating,flavor,summary,body,story,source,created_at,updated_at,health,geo,country,subtype,subtype_src)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14::timestamptz,now()),now(),$15,$16,$17,$18,$19)
       ON CONFLICT (id) DO UPDATE SET type=$2,name=$3,alt=$4,region=$5,tags=$6,status=$7,rating=$8,flavor=$9,
-        summary=$10,body=$11,story=$12,source=$13,health=$15,geo=$16,country=$17,updated_at=now()`,
-      [id, d.type, d.name, d.alt, d.region, d.tags, d.status, d.rating, d.flavor, d.summary, d.body, d.story, d.source, created || null, d.health, d.geo, d.country]);
+        summary=$10,body=$11,story=$12,source=$13,health=$15,geo=$16,country=$17,subtype=$18,subtype_src=$19,updated_at=now()`,
+      [id, d.type, d.name, d.alt, d.region, d.tags, d.status, d.rating, d.flavor, d.summary, d.body, d.story, d.source, created || null, d.health, d.geo, d.country, d.subtype, d.subtypeSrc]);
 
     await c.query("DELETE FROM relations WHERE from_id=$1", [id]);
     let pos = 0;
