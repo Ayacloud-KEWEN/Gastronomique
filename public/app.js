@@ -211,7 +211,7 @@ function home(){
   const recent = [...items].sort((a,b)=>(b.created||"").localeCompare(a.created||"")).slice(0,8);
   // 最近一批：与最新一件同一天入藏的数量
   const lastDay = (recent[0]?.created||"").slice(0,10), batch = lastDay ? items.filter(i => (i.created||"").startsWith(lastDay)).length : 0;
-  const cols = collections().map(c => ({ c, p: progress(membersOf(c.id)) }))
+  const cols = collections().filter(c => c.type !== "restaurant").map(c => ({ c, p: progress(membersOf(c.id)) }))   // 首页只放主题专题
     .sort((a,b) => (b.p.want>0) - (a.p.want>0) || b.p.tried/b.p.total - a.p.tried/a.p.total).slice(0,3);
   app.innerHTML = `
   <section class="hero">
@@ -297,9 +297,15 @@ function atlas(params){
   const tabs = {tried:"已品尝",want:"想尝清单",collections:"专题收藏",journal:"品尝日志"};
   let body;
   if (tab==="collections"){
-    const cs = collections();
-    body = cs.length ? `<div class="col-grid">${cs.map(colCard).join("")}</div>`
-      : `<div class="empty">当 3 件以上藏品在「关系」中以「出现于」指向同一件藏品（如一份收藏指南），它就成为一个专题。</div>`;
+    // 餐馆本身也会成为专题（扫菜单收进的菜都「出现于」餐馆），单独放进「餐馆收藏」子目录
+    const sub = params.get("sub") === "restaurants" ? "restaurants" : "themes";
+    const all = collections(), rs = all.filter(c => c.type === "restaurant"), themes = all.filter(c => c.type !== "restaurant");
+    const cs = sub === "restaurants" ? rs : themes;
+    const subs = [["themes", "主题专题", themes.length], ["restaurants", "餐馆收藏", rs.length]];
+    body = `<div class="seg" style="margin-bottom:14px">${subs.map(([k,v,n])=>`<button class="sm ${k===sub?"on":""}" onclick="location.hash='#/atlas?tab=collections&sub=${k}'">${v} · ${n}</button>`).join("")}</div>`
+      + (cs.length ? `<div class="col-grid">${cs.map(colCard).join("")}</div>`
+      : sub === "restaurants" ? `<div class="empty">在餐厅扫菜单、把菜收进馆藏后，收了 3 道以上菜的餐馆会出现在这里。</div>`
+      : `<div class="empty">当 3 件以上藏品在「关系」中以「出现于」指向同一件藏品（如一份收藏指南），它就成为一个专题。</div>`);
   } else if (tab==="journal"){
     const entries = db.items.flatMap(i => (i.journal||[]).map(j => ({...j, it:i}))).sort((a,b)=>b.date.localeCompare(a.date));
     body = entries.length ? entries.map(e=>`<div class="entry"><time>${esc(e.date)}</time> · <a href="#/item/${encodeURIComponent(e.it.id)}" style="color:var(--accent)">${esc(e.it.name)}</a>${e.place?` · <span class="muted">${esc(e.place)}</span>`:""}${priceLine(e)}${e.text?`<div class="prose" style="font-size:15px">${esc(e.text)}</div>`:""}</div>`).join("")
