@@ -546,7 +546,7 @@ function editor(it, preset={}, focus=""){
       <div class="toggles" id="hTags">${[...new Set([...HEALTH_TAGS, ...h.tags])].map(t=>`<button type="button" class="${h.tags.includes(t)?"on":""}">${esc(t)}</button>`).join("")}</div>
       <label>备注<input name="hnote" value="${esc(h.note||"")}" placeholder="如：传统做法较咸，可配清汤"></label>`, "配料、热量、营养水平")}
     ${sec("正文与轶事", has(d.body, d.story, d.source), `
-      <label>正文 <small class="muted">用 [[名称]] 链接其他藏品</small><textarea name="body" rows="6">${esc(d.body)}</textarea></label>
+      <label>正文 <small class="muted">用 [[名称]] 链接其他藏品；可直接粘贴或拖入图片</small><textarea name="body" rows="6">${esc(d.body)}</textarea></label>
       <label>轶事 / 冷知识<textarea name="story" rows="3">${esc(d.story)}</textarea></label>
       <label>来源 / 参考<input name="source" value="${esc(d.source)}"></label>`)}
     ${sec("标签与关系", has(d.tags, d.relations), `
@@ -618,22 +618,31 @@ function editor(it, preset={}, focus=""){
   const drawMedia = () => { $("#medList").innerHTML = d.media.map((m,i)=>`<div class="mthumb"><div class="mt-img">${mediaEl(m,"",true)}</div>
       <input data-cap="${i}" value="${esc(m.caption||"")}" placeholder="图注">
       <div><button type="button" class="sm" data-ins="${i}">插入正文</button>${i?`<button type="button" class="sm" data-cov="${i}">设为封面</button>`:`<span class="muted" style="font-size:11px">★ 封面</span>`}<button type="button" class="sm ghost" data-rm="${i}">×</button></div></div>`).join(""); };
+  const insTok = (ids, p = body.selectionStart ?? body.value.length) => {
+    const tok = ids.map(id => `
+![[m:${id}]]
+`).join("");
+    body.value = body.value.slice(0,p) + tok + body.value.slice(p); body.selectionStart = body.selectionEnd = p + tok.length;
+    body.closest("details").open = true; body.focus(); markDirty(); saveDraft(); };
+  // 返回新增媒体的 id，供粘贴/拖入正文时插入
   const addFiles = async files => {
+    const added = [];
     for (const [n, f] of files.entries()){
       if (!/^(image|video)\//.test(f.type)) continue;
       if (f.size > 300*1024*1024 && !confirm(`${f.name} 有 ${(f.size/1048576).toFixed(0)}MB，仍要保存吗？`)) continue;
       $("#upProg").textContent = `上传中 ${n+1}/${files.length}：${f.name}（${(f.size/1048576).toFixed(1)}MB）…`;
       const fd = new FormData(); fd.append("file", f);
-      try { d.media.push(await api("/api/media", {method:"POST", body:fd})); markDirty(); drawMedia(); saveDraft(); }
+      try { const m = await api("/api/media", {method:"POST", body:fd}); d.media.push(m); added.push(m.id); markDirty(); drawMedia(); saveDraft(); }
       catch(e){
         if (!isOffline(e)) { toast("上传失败：" + e.message); continue; }
         const id = "local-" + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
         await OB.putFile(id, f); localUrls.set(id, URL.createObjectURL(f));
-        d.media.push({ id, kind: kindOf(f.type), name: f.name, local: true }); markDirty(); drawMedia();
+        d.media.push({ id, kind: kindOf(f.type), name: f.name, local: true }); added.push(id); markDirty(); drawMedia();
         toast("离线：照片已暂存在本机，联网后自动上传");
       }
     }
     $("#upProg").textContent = "";
+    return added;
   };
   drawMedia();
   form.querySelectorAll("[data-up]").forEach(inp => inp.onchange = e => { addFiles([...e.target.files]); e.target.value=""; });
@@ -641,8 +650,12 @@ function editor(it, preset={}, focus=""){
     d.media.push({id:"u-"+Date.now().toString(36), url:u, kind:kindOf(u), name:u.split("/").pop()}); $("#medUrl").value=""; drawMedia(); };
   const mc = $("#modalCard");
   mc.ondragover = e => e.preventDefault();
-  mc.ondrop = e => { if (e.dataTransfer.files.length){ e.preventDefault(); addFiles([...e.dataTransfer.files]); } };
-  mc.onpaste = e => { const fs = [...e.clipboardData.files]; if (fs.length){ e.preventDefault(); addFiles(fs); } };
+  // 粘贴/拖入正文框：上传后在光标处插入图片；拖到别处只加入媒体
+  const drop = async (e, fs) => { if (!fs.length) return; e.preventDefault();
+    const inBody = e.target === body, p = body.selectionStart ?? body.value.length;
+    const ids = await addFiles(fs); if (inBody && ids.length) insTok(ids, p); };
+  mc.ondrop = e => drop(e, [...e.dataTransfer.files]);
+  mc.onpaste = e => drop(e, [...e.clipboardData.files]);
   $("#medList").oninput = e => { const i = e.target.dataset.cap; if (i!=null) d.media[i].caption = e.target.value; };
   $("#medList").onclick = e => { const t = e.target.dataset;
     if (t.ins!=null){ const tok = `\n![[m:${d.media[t.ins].id}]]\n`, p = body.selectionStart ?? body.value.length; body.value = body.value.slice(0,p) + tok + body.value.slice(p);
