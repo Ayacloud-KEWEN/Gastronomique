@@ -328,15 +328,52 @@ function atlas(params){
       + (cs.length ? `<div class="col-grid">${cs.map(colCard).join("")}</div>`
       : sub === "restaurants" ? `<div class="empty">在餐厅扫菜单、把菜收进馆藏后，收了 3 道以上菜的餐馆会出现在这里。</div>`
       : `<div class="empty">当 3 件以上藏品在「关系」中以「出现于」指向同一件藏品（如一份收藏指南），它就成为一个专题。</div>`);
-  } else if (tab==="journal"){
-    const entries = db.items.flatMap(i => (i.journal||[]).map(j => ({...j, it:i}))).sort((a,b)=>b.date.localeCompare(a.date));
-    body = entries.length ? entries.map(e=>`<div class="entry"><time>${esc(e.date)}</time> · <a href="#/item/${encodeURIComponent(e.it.id)}" style="color:var(--accent)">${esc(e.it.name)}</a>${e.place?` · <span class="muted">${esc(e.place)}</span>`:""}${priceLine(e)}${e.text?`<div class="prose" style="font-size:15px">${esc(e.text)}</div>`:""}</div>`).join("")
-      : `<div class="empty">在任意藏品页面写下「品尝日志」，它们会汇集在这里。</div>`;
   } else {
-    body = grid(db.items.filter(i=>i.status===tab).sort((a,b)=>(b.rating||0)-(a.rating||0)));
+    body = `<div id="atl"></div>`;
   }
   app.innerHTML = `<div class="section-h" style="margin-top:0"><h2>我的 Atlas</h2><span class="muted">个人体验与记录</span></div>
   <div class="seg" style="margin-bottom:20px">${Object.entries(tabs).map(([k,v])=>`<button class="${k===tab?"on":""}" onclick="location.hash='#/atlas?tab=${k}'">${v}</button>`).join("")}</div>${body}`;
+  if (tab !== "collections") atlasList(tab, params);
+}
+
+// 已品尝 / 想尝 / 品尝日志：按类别筛选、搜索、排序，分页显示（「显示更多」）
+function atlasList(tab, params){
+  const box = $("#atl"), isJ = tab === "journal", PAGE = isJ ? 30 : 24;
+  const st = { t: TYPES[params.get("t")] ? params.get("t") : "", q: "", sort: "rating", n: PAGE };
+  const all = isJ ? db.items.flatMap(i => (i.journal||[]).map(j => ({...j, it:i}))).sort((a,b)=>b.date.localeCompare(a.date))
+                  : db.items.filter(i => i.status === tab);
+  const itOf = x => isJ ? x.it : x;
+  if (!all.length) { box.innerHTML = isJ ? `<div class="empty">在任意藏品页面写下「品尝日志」，它们会汇集在这里。</div>` : grid([]); return; }
+  const counts = {}; for (const x of all) counts[itOf(x).type] = (counts[itOf(x).type]||0) + 1;
+  box.innerHTML = `<div class="atl-bar">
+      <input id="aq" type="search" placeholder="在 ${all.length} ${isJ?"条日志":"件藏品"}中搜索…" autocomplete="off">
+      ${isJ ? "" : `<select id="as"><option value="rating">按评分</option><option value="recent">最近更新</option><option value="name">按名称</option></select>`}
+    </div>
+    <div class="seg" id="at" style="margin:10px 0 16px"></div><div id="al"></div>`;
+  const draw = () => {
+    $("#at").innerHTML = `<button class="sm ${!st.t?"on":""}" data-t="">全部 · ${all.length}</button>`
+      + Object.keys(TYPES).filter(k => counts[k]).map(k => `<button class="sm ${st.t===k?"on":""}" data-t="${k}">${TYPES[k].zh} · ${counts[k]}</button>`).join("");
+    const q = st.q.trim().toLowerCase();
+    let list = all.filter(x => { const i = itOf(x); return (!st.t || i.type === st.t)
+      && (!q || [i.name, i.alt, i.region, ...(i.tags||[]), ...(isJ ? [x.text, x.place, x.shop] : [])].some(s => (s||"").toLowerCase().includes(q))); });
+    if (!isJ) list.sort(st.sort === "name" ? (a,b) => a.name.localeCompare(b.name, "zh")
+      : st.sort === "recent" ? (a,b) => (b.updated||"").localeCompare(a.updated||"")
+      : (a,b) => (b.rating||0)-(a.rating||0) || a.name.localeCompare(b.name, "zh"));
+    const shown = list.slice(0, st.n), rest = list.length - shown.length;
+    let html;
+    if (!list.length) html = `<div class="empty">没有符合条件的${isJ?"日志":"藏品"}。</div>`;
+    else if (isJ) { let m = "";   // 日志按月分组
+      html = shown.map(e => { const mm = (e.date||"").slice(0,7), h = mm !== m ? `<h4 class="eyebrow atl-month">${esc(mm)}</h4>` : ""; m = mm;
+        return h + `<div class="entry"><time>${esc(e.date)}</time> · <a href="#/item/${encodeURIComponent(e.it.id)}" style="color:var(--accent)">${esc(e.it.name)}</a>${e.place?` · <span class="muted">${esc(e.place)}</span>`:""}${priceLine(e)}${e.text?`<div class="prose" style="font-size:15px">${esc(e.text)}</div>`:""}</div>`; }).join("");
+    } else html = grid(shown);
+    $("#al").innerHTML = html + (rest > 0 ? `<div class="atl-more"><button id="amore">显示更多（还有 ${rest} ${isJ?"条":"件"}）</button><span class="muted">已显示 ${shown.length} / ${list.length}</span></div>` : "");
+    $("#amore")?.addEventListener("click", () => { st.n += PAGE; draw(); });
+  };
+  $("#aq").oninput = e => { st.q = e.target.value; st.n = PAGE; draw(); };
+  if (!isJ) $("#as").onchange = e => { st.sort = e.target.value; st.n = PAGE; draw(); };
+  $("#at").onclick = e => { const b = e.target.closest("[data-t]"); if (!b) return; st.t = b.dataset.t; st.n = PAGE;
+    history.replaceState(null, "", `#/atlas?tab=${tab}${st.t?`&t=${st.t}`:""}`); draw(); };
+  draw();
 }
 
 function stories(){
