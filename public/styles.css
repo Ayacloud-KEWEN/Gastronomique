@@ -596,7 +596,12 @@ a.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 
 /* 我的 Atlas：筛选栏与分页 */
 .atl-bar{display:flex;gap:8px}
-.atl-bar input{flex:1;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink)}
-.atl-bar select{flex-shrink:0}
+.atl-bar input,.atl-bar select{border:1px solid var(--line);background-color:var(--paper);border-radius:999px;padding:7px 14px;color:var(--ink);font-size:14px}
+.atl-bar input{flex:1;min-width:0}
+/* 下拉框：去掉系统外观，换成与搜索框一致的胶囊样式和细箭头 */
+.atl-bar select{flex-shrink:0;appearance:none;-webkit-appearance:none;cursor:pointer;padding-right:30px;
+  background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);
+  background-position:right 15px center,right 11px center;background-size:4px 4px;background-repeat:no-repeat}
+.atl-bar input:focus,.atl-bar select:focus{outline:none;border-color:var(--ink)}
 .atl-more{display:flex;flex-direction:column;align-items:center;gap:6px;margin:22px 0 8px;font-size:12px}
 .atl-month{margin:18px 0 6px}
